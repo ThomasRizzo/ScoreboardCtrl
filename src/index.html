@@ -11,15 +11,30 @@
     <button type="button" onclick="led(true)">ON</button>
     <button type="button" onclick="led(false)">OFF</button>
     <p id="led"></p>
+    <div>
+        <button type="button" onclick="ctrl(0)">Start/Stop</button>
+        <p id="ctrl"></p>
+    </div>
     <script>
         function led(state) {
-            var xhttp = new XMLHttpRequest();            
+            var xhttp = new XMLHttpRequest();
             xhttp.onreadystatechange = function () {
                 if (this.readyState == 4 && this.status == 200) {
                     document.getElementById("led").innerHTML = this.responseText;
                 }
             };
             if (state) { xhttp.open("GET", "/set/true", true); } else { xhttp.open("GET", "/set/false", true); }
+            xhttp.send();
+        }
+
+        function ctrl(id) {
+            var xhttp = new XMLHttpRequest();
+            xhttp.onreadystatechange = function () {
+                if (this.readyState == 4 && this.status == 200) {
+                    document.getElementById("ctrl").innerHTML = this.responseText;
+                }
+            };
+            xhttp.open("GET", "/ctrl/" + id, true);
             xhttp.send();
         }
     </script>
