@@ -6,12 +6,12 @@ use cyw43::Control;
 use cyw43_pio::PioSpi;
 use embassy_rp::{
     gpio::{Level, Output},
-    peripherals::{DMA_CH0, PIN_23, PIN_25, PIO0},
+    peripherals::{DMA_CH0, PIN_0, PIN_1, PIN_2, PIN_23, PIN_25, PIN_3, PIN_4, PIN_5, PIO0},
     pio::Pio,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::Duration;
-use heapless::Vec;
+use embassy_time::Timer;
 use panic_halt as _;
 use picoserve::{
     response::DebugValue,
@@ -22,8 +22,7 @@ use static_cell::make_static;
 
 use picoserve::extract::State;
 
-const WIFI_SSID: &str = "Pico3";
-const WIFI_PASSWORD: &str = "xxxxxxxx";
+const WIFI_SSID: &str = "Scoreboard";
 
 #[derive(serde::Deserialize)]
 struct FormValue {
@@ -76,13 +75,32 @@ impl picoserve::Timer for EmbassyTimer {
 #[derive(Clone, Copy)]
 struct SharedControl(&'static Mutex<CriticalSectionRawMutex, Control<'static>>);
 
+struct IO {
+    start: Output<'static, PIN_0>, //start/stop
+    home_inc: Output<'static, PIN_1>,
+    home_dec: Output<'static, PIN_2>,
+    away_inc: Output<'static, PIN_3>,
+    away_dec: Output<'static, PIN_4>,
+    reset: Output<'static, PIN_5>,
+}
+
+#[derive(Clone, Copy)]
+struct SharedIO(&'static Mutex<CriticalSectionRawMutex, IO>);
+
 struct AppState {
     shared_control: SharedControl,
+    io: SharedIO,
 }
 
 impl picoserve::extract::FromRef<AppState> for SharedControl {
     fn from_ref(state: &AppState) -> Self {
         state.shared_control
+    }
+}
+
+impl picoserve::extract::FromRef<AppState> for SharedIO {
+    fn from_ref(state: &AppState) -> Self {
+        state.io
     }
 }
 
@@ -139,48 +157,6 @@ async fn web_task(
     }
 }
 
-
-
-#[embassy_executor::task]
-async fn dns_task(
-    stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
-) -> ! {
-    use embassy_net::udp::{PacketMetadata, UdpSocket};
-
-    let mut rx_buffer = [0; 1024];
-    let mut tx_buffer = [0; 1024];
-
-    //using example: https://github.com/embassy-rs/embassy/blob/6ff0e4bcf5fbcccd8ae52cc83be7ed9f83b66fde/examples/rp/src/bin/ethernet_w5500_udp.rs#L2
-    let mut rx_meta = [PacketMetadata::EMPTY; 16]; //why 16?
-    let mut tx_meta = [PacketMetadata::EMPTY; 16];
-    let mut buf = [0; 4096];
-
-    loop {
-
-        let mut socket = UdpSocket::new(stack, &mut rx_meta, &mut rx_buffer, &mut tx_meta, &mut tx_buffer);
-
-        log::info!("Listening on UDP:53...");
-        
-        if let Err(e) = socket.bind(53) {
-            log::warn!("UPD bind error: {:?}", e);
-            continue;
-        }
- 
-        loop {
-            let (n, ep) = socket.recv_from(&mut buf).await.unwrap();
-            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                log::info!("rxd from {}: {}", ep, s);
-            }
-
-            //TODO: reply with AP's IP 
-
-            //socket.send_to(&buf[..n], ep).await.unwrap();
-        }
-        
-       
-    }
-}
-
 #[embassy_executor::main]
 async fn main(spawner: embassy_executor::Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -209,15 +185,12 @@ async fn main(spawner: embassy_executor::Spawner) {
 
     control.init(clm).await;
 
-    let mut ds = Vec::<_, 3>::new();
-    ds.push(embassy_net::Ipv4Address::new(169, 254, 1, 1)).ok();
-
     let stack = &*make_static!(embassy_net::Stack::new(
         net_device,
         embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
-            address: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(169, 254, 1, 1), 16),
+            address: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(192, 168, 0, 10), 16),
             gateway: None,
-            dns_servers: ds, //TODO: this what AP sends to clients?
+            dns_servers: Default::default(),
         }),
         make_static!(embassy_net::StackResources::<WEB_TASK_POOL_SIZE>::new()),
         embassy_rp::clocks::RoscRng.gen(),
@@ -225,8 +198,17 @@ async fn main(spawner: embassy_executor::Spawner) {
 
     spawner.must_spawn(net_task(stack));
 
-    control.start_ap_wpa2(WIFI_SSID, WIFI_PASSWORD, 8).await;
-    //control.start_ap_open(WIFI_SSID, 8).await;
+    //Try to connect forever (AP and PiPicoW powered on at same time, so need to wait a minute for AP to boot)
+    loop {
+        control.gpio_set(0, true).await;
+        match control.join_open(WIFI_SSID).await {
+            Ok(_) => break,
+            Err(_) => {
+                control.gpio_set(0, false).await;
+                Timer::after_millis(500).await;
+            }
+        }
+    }
 
     fn make_app() -> picoserve::Router<AppRouter, AppState> {
         picoserve::Router::new()
@@ -249,6 +231,23 @@ async fn main(spawner: embassy_executor::Spawner) {
                     },
                 ),
             )
+            .route(
+                ("/ctrl", parse_path_segment()),
+                get(|id, State(SharedIO(io)): State<SharedIO>| async move {
+                    match id {
+                        //TODO: make id an enum
+                        0 => {
+                            let mut io = io.lock().await;
+                            io.start.set_high();
+                            Timer::after_millis(50).await;
+                            io.start.set_low();
+                            DebugValue("Start/Stop Button")
+                        }
+                        _ => DebugValue("Unknown function")
+                    }
+
+                }),
+            )
     }
 
     let app = make_static!(make_app());
@@ -260,9 +259,17 @@ async fn main(spawner: embassy_executor::Spawner) {
     })
     .keep_connection_alive());
 
-    control.gpio_set(0, true).await;
-
     let shared_control = SharedControl(make_static!(Mutex::new(control)));
+    let io = IO {
+        start: Output::new(p.PIN_0, Level::Low),
+        home_inc: Output::new(p.PIN_1, Level::Low),
+        home_dec: Output::new(p.PIN_2, Level::Low),
+        away_inc: Output::new(p.PIN_3, Level::Low),
+        away_dec: Output::new(p.PIN_4, Level::Low),
+        reset: Output::new(p.PIN_5, Level::Low),
+
+    };
+    let io = SharedIO(make_static!(Mutex::new(io)));
 
     for id in 0..WEB_TASK_POOL_SIZE {
         spawner.must_spawn(web_task(
@@ -270,10 +277,7 @@ async fn main(spawner: embassy_executor::Spawner) {
             stack,
             app,
             config,
-            AppState { shared_control },
+            AppState { shared_control, io },
         ));
     }
-
-    spawner.spawn(dns_task(stack)).ok();
-
 }
