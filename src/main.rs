@@ -4,19 +4,18 @@
 
 use cyw43::Control;
 use cyw43_pio::PioSpi;
+use embassy_rp::uart::UartRx;
 use embassy_rp::{
     gpio::{Level, Output},
-    peripherals::{DMA_CH0, PIN_0, PIN_1, PIN_2, PIN_23, PIN_25, PIN_3, PIN_4, PIN_5, PIO0},
+    peripherals::{DMA_CH0, PIN_0, PIN_1, PIN_2, PIN_23, PIN_25, PIN_3, PIN_4, PIN_5, PIO0, UART1},
     pio::Pio,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::Duration;
 use embassy_time::Timer;
+use log::info;
 use panic_halt as _;
-use picoserve::{
-    response::DebugValue,
-    routing::{get, parse_path_segment},
-};
+use picoserve::routing::{get, parse_path_segment};
 use rand::Rng;
 use static_cell::make_static;
 
@@ -24,15 +23,10 @@ use picoserve::extract::State;
 
 const WIFI_SSID: &str = "Scoreboard";
 
-#[derive(serde::Deserialize)]
-struct FormValue {
-    a: i32,
-    b: heapless::String<32>,
-}
-
 embassy_rp::bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
+    UART1_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART1>;
 });
 
 #[embassy_executor::task]
@@ -87,9 +81,19 @@ struct IO {
 #[derive(Clone, Copy)]
 struct SharedIO(&'static Mutex<CriticalSectionRawMutex, IO>);
 
+#[derive(serde::Serialize)]
+struct SbState {
+    min: u8,
+    sec: u8,
+}
+
+#[derive(Clone, Copy)]
+struct SharedSbState(&'static Mutex<CriticalSectionRawMutex, SbState>);
+
 struct AppState {
     shared_control: SharedControl,
     io: SharedIO,
+    sb: SharedSbState,
 }
 
 impl picoserve::extract::FromRef<AppState> for SharedControl {
@@ -104,9 +108,44 @@ impl picoserve::extract::FromRef<AppState> for SharedIO {
     }
 }
 
+impl picoserve::extract::FromRef<AppState> for SharedSbState {
+    fn from_ref(state: &AppState) -> Self {
+        state.sb
+    }
+}
+
 type AppRouter = impl picoserve::routing::PathRouter<AppState>;
 
 const WEB_TASK_POOL_SIZE: usize = 8;
+
+/// Reads seral output from scoreboard and updates shared state  
+/// Packets are 6 bytes.  
+/// minutes/sec are 0xFF - value / 2
+/// - 0x00
+/// - Minutes
+/// - Seconds
+/// - Shotclock
+/// - 0x3F
+/// - CRC?
+#[embassy_executor::task]
+async fn read_serial(
+    mut rx: UartRx<'static, UART1, embassy_rp::uart::Async>,
+    sb: SharedSbState,
+) -> ! {
+    let mut buf = [0; 5];
+    loop {
+        match rx.read(&mut buf[..1]).await {
+            Ok(_) if buf[0] == 0 => {
+                rx.read(&mut buf).await.ok();
+                let mut x = sb.0.lock().await;
+                x.min = 0xFF - buf[0] / 2;
+                x.sec = 0xFF - buf[1] / 2;
+                info!("{0}:{1}", x.min, x.sec);
+            }
+            _ => continue,
+        }
+    }
+}
 
 #[embassy_executor::task(pool_size = WEB_TASK_POOL_SIZE)]
 async fn web_task(
@@ -210,18 +249,18 @@ async fn main(spawner: embassy_executor::Spawner) {
         }
     }
 
+    //configure uart for reading time from scoreboard
+    let mut c = embassy_rp::uart::Config::default();
+    c.baudrate = 38400;
+    let rx = UartRx::new(p.UART1, p.PIN_9, Irqs, p.DMA_CH1, c);
+    let sb = SharedSbState(make_static!(Mutex::new(SbState { min: 0, sec: 0 })));
+    spawner.must_spawn(read_serial(rx, sb));
+
     fn make_app() -> picoserve::Router<AppRouter, AppState> {
+        use picoserve::response::*;
         picoserve::Router::new()
             //.route("/", get(|| async move { "Hello World" }))
-            .route(
-                "/",
-                get(|| picoserve::response::File::html(include_str!("index.html"))).post(
-                    |picoserve::extract::Form(FormValue { a, b })| {
-                        log::info!("Received: {:?} {:?}", a, b);
-                        picoserve::response::Redirect::to("/")
-                    },
-                ),
-            )
+            .route("/", get(|| File::html(include_str!("index.html"))))
             .route(
                 ("/set", parse_path_segment()),
                 get(
@@ -230,6 +269,13 @@ async fn main(spawner: embassy_executor::Spawner) {
                         DebugValue(led_is_on)
                     },
                 ),
+            )
+            .route(
+                "/time",
+                get(|State(SharedSbState(t)): State<SharedSbState>| async move {
+                    let t = t.lock().await;
+                    DebugValue(("min", t.min, "sec", t.sec))
+                }),
             )
             .route(
                 ("/ctrl", parse_path_segment()),
@@ -243,9 +289,8 @@ async fn main(spawner: embassy_executor::Spawner) {
                             io.start.set_low();
                             DebugValue("Start/Stop Button")
                         }
-                        _ => DebugValue("Unknown function")
+                        _ => DebugValue("Unknown function"),
                     }
-
                 }),
             )
     }
@@ -267,7 +312,6 @@ async fn main(spawner: embassy_executor::Spawner) {
         away_inc: Output::new(p.PIN_3, Level::Low),
         away_dec: Output::new(p.PIN_4, Level::Low),
         reset: Output::new(p.PIN_5, Level::Low),
-
     };
     let io = SharedIO(make_static!(Mutex::new(io)));
 
@@ -277,7 +321,11 @@ async fn main(spawner: embassy_executor::Spawner) {
             stack,
             app,
             config,
-            AppState { shared_control, io },
+            AppState {
+                shared_control,
+                io,
+                sb,
+            },
         ));
     }
 }
