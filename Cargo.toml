@@ -7,12 +7,25 @@ edition = "2021"
 
 [dependencies]
 cortex-m-rt = "0.7.3"
-cyw43 = { git = "https://github.com/embassy-rs/embassy", rev="e8a832e" }
+cyw43 = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e" }
 cyw43-pio = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e" }
-embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e", features = ["arch-cortex-m", "executor-thread", "nightly", "integrated-timers"] }
+embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e", features = [
+    "arch-cortex-m",
+    "executor-thread",
+    "nightly",
+    "integrated-timers",
+] }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e" }
-embassy-net = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e", features = ["tcp", "udp", "proto-ipv4", "medium-ethernet"] }
-embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e", features = ["critical-section-impl", "time-driver"] }
+embassy-net = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e", features = [
+    "tcp",
+    "udp",
+    "proto-ipv4",
+    "medium-ethernet",
+] }
+embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e", features = [
+    "critical-section-impl",
+    "time-driver",
+] }
 embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e" }
 embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e" }
 embassy-usb-logger = { git = "https://github.com/embassy-rs/embassy", rev = "e8a832e" }
@@ -20,7 +33,9 @@ embedded-io-async = "0.6.0"
 log = { version = "0.4.20", default-features = false }
 panic-halt = "0.2.0"
 picoserve = "0.7.1"
-portable-atomic = { version = "1.6.0", features = ["critical-section"], default-features = false }
+portable-atomic = { version = "1.6.0", features = [
+    "critical-section",
+], default-features = false }
 rand = { version = "0.8.5", default-features = false }
 static_cell = { version = "2.0.0", features = ["nightly"] }
 

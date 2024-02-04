@@ -120,7 +120,7 @@ const WEB_TASK_POOL_SIZE: usize = 8;
 
 /// Reads seral output from scoreboard and updates shared state  
 /// Packets are 6 bytes.  
-/// minutes/sec are 0xFF - value / 2
+/// minutes/sec = 0xFF - value / 2
 /// - 0x00
 /// - Minutes
 /// - Seconds
@@ -133,14 +133,20 @@ async fn read_serial(
     sb: SharedSbState,
 ) -> ! {
     let mut buf = [0; 5];
+    let mut prev = [0; 2]; //min,sec bytes
+    info!("Read serial task started");
     loop {
         match rx.read(&mut buf[..1]).await {
             Ok(_) if buf[0] == 0 => {
                 rx.read(&mut buf).await.ok();
-                let mut x = sb.0.lock().await;
-                x.min = 0xFF - buf[0] / 2;
-                x.sec = 0xFF - buf[1] / 2;
-                info!("{0}:{1}", x.min, x.sec);
+
+                if buf[0..2] != prev {
+                    prev.copy_from_slice(&buf[0..2]);
+                    let mut x = sb.0.lock().await;
+                    x.min = 0xFF - buf[0] / 2;
+                    x.sec = 0xFF - buf[1] / 2;
+                    info!("{0}:{1}", x.min, x.sec);
+                }
             }
             _ => continue,
         }
@@ -198,7 +204,25 @@ async fn web_task(
 
 #[embassy_executor::main]
 async fn main(spawner: embassy_executor::Spawner) {
-    let p = embassy_rp::init(Default::default());
+    use embassy_rp::{clocks, config};
+
+    //Experimenting external clock sources on XIN. 
+    //It's not clear how to configure. Does Crystal Oscillator Control need to be disabled? 
+    //See datasheet p.220 XOSC Ctrl Register, and 2.15.2.3. External Clocks
+    //2.16.1. Overview:
+    //  "If the user already has an accurate clock source then it is possible to drive an external clock directly into XIN (aka XI),
+    //  and disable the oscillator circuit. In this mode XIN can be driven at up to 50MHz."
+    // https://github.com/raspberrypi/pico-feedback/issues/322
+    // https://forums.raspberrypi.com/viewtopic.php?t=357622  <-- looks like just connect to XIN and leave settings as is.
+    // How to handle using USB bootloader (which assumes 12MHz xtal) and then changing clock freq here?
+    // Misc bootloader info:
+    //  https://blog.usedbytes.com/2021/12/pico-serial-bootloader/
+    //  https://github.com/rp-rs/rp2040-boot2/tree/main
+    //  https://forums.raspberrypi.com/viewtopic.php?p=2138495&hilit=xosc+frequency#p2138495 
+    //  https://github.com/raspberrypi/pico-bootrom/blob/master/bootrom/bootrom_main.c#L101
+    let c = config::Config::new(clocks::ClockConfig::crystal(12_000_000)); 
+
+    let p = embassy_rp::init(c);
 
     spawner.must_spawn(logger_task(p.USB));
 
