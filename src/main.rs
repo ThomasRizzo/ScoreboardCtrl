@@ -7,7 +7,7 @@ use cyw43_pio::PioSpi;
 use embassy_rp::uart::UartRx;
 use embassy_rp::{
     gpio::{Level, Output},
-    peripherals::{DMA_CH0, PIN_0, PIN_1, PIN_2, PIN_23, PIN_25, PIN_3, PIN_4, PIN_5, PIO0, UART1},
+    peripherals::{DMA_CH0, PIN_0, PIN_1, PIN_2, PIN_23, PIN_25, PIN_3, PIN_4, PIN_5, PIO0, UART0},
     pio::Pio,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
@@ -26,7 +26,7 @@ const WIFI_SSID: &str = "Scoreboard";
 embassy_rp::bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
-    UART1_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART1>;
+    UART0_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART0>;
 });
 
 #[embassy_executor::task]
@@ -129,7 +129,7 @@ const WEB_TASK_POOL_SIZE: usize = 8;
 /// - CRC?
 #[embassy_executor::task]
 async fn read_serial(
-    mut rx: UartRx<'static, UART1, embassy_rp::uart::Async>,
+    mut rx: UartRx<'static, UART0, embassy_rp::uart::Async>,
     sb: SharedSbState,
 ) -> ! {
     let mut buf = [0; 5];
@@ -206,22 +206,7 @@ async fn web_task(
 async fn main(spawner: embassy_executor::Spawner) {
     use embassy_rp::{clocks, config};
 
-    //Experimenting external clock sources on XIN. 
-    //It's not clear how to configure. Does Crystal Oscillator Control need to be disabled? 
-    //See datasheet p.220 XOSC Ctrl Register, and 2.15.2.3. External Clocks
-    //2.16.1. Overview:
-    //  "If the user already has an accurate clock source then it is possible to drive an external clock directly into XIN (aka XI),
-    //  and disable the oscillator circuit. In this mode XIN can be driven at up to 50MHz."
-    // https://github.com/raspberrypi/pico-feedback/issues/322
-    // https://forums.raspberrypi.com/viewtopic.php?t=357622  <-- looks like just connect to XIN and leave settings as is.
-    // How to handle using USB bootloader (which assumes 12MHz xtal) and then changing clock freq here?
-    // Misc bootloader info:
-    //  https://blog.usedbytes.com/2021/12/pico-serial-bootloader/
-    //  https://github.com/rp-rs/rp2040-boot2/tree/main
-    //  https://forums.raspberrypi.com/viewtopic.php?p=2138495&hilit=xosc+frequency#p2138495 
-    //  https://github.com/raspberrypi/pico-bootrom/blob/master/bootrom/bootrom_main.c#L101
     let c = config::Config::new(clocks::ClockConfig::crystal(12_000_000)); 
-
     let p = embassy_rp::init(c);
 
     spawner.must_spawn(logger_task(p.USB));
@@ -276,7 +261,7 @@ async fn main(spawner: embassy_executor::Spawner) {
     //configure uart for reading time from scoreboard
     let mut c = embassy_rp::uart::Config::default();
     c.baudrate = 38400;
-    let rx = UartRx::new(p.UART1, p.PIN_9, Irqs, p.DMA_CH1, c);
+    let rx = UartRx::new(p.UART0, p.PIN_17, Irqs, p.DMA_CH1, c);
     let sb = SharedSbState(make_static!(Mutex::new(SbState { min: 0, sec: 0 })));
     spawner.must_spawn(read_serial(rx, sb));
 
