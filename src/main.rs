@@ -143,9 +143,9 @@ async fn read_serial(
                 if buf[0..2] != prev {
                     prev.copy_from_slice(&buf[0..2]);
                     let mut x = sb.0.lock().await;
-                    x.min = 0xFF - buf[0] / 2;
-                    x.sec = 0xFF - buf[1] / 2;
-                    info!("{0}:{1}", x.min, x.sec);
+                    x.min = buf[0];
+                    x.sec = buf[1];
+                    info!("{0} Min {1} Sec", x.min, x.sec);
                 }
             }
             _ => continue,
