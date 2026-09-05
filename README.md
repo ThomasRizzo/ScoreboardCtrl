@@ -2,7 +2,7 @@
 
 Web UI for a GameCraft [SK2229R](https://www.amazon.com/BSN-Multisport-Indoor-Tabletop-Scoreboard/dp/B003SFP4CI) tabletop scoreboard. The included remote cannot reset the clock; this Pico W firmware can, and it drives start/stop and home/away scores from a phone.
 
-Embassy firmware: the Pico broadcasts an open **Scoreboard** AP and serves the UI itself. Unlike [ScoreboardCtrl](https://github.com/ThomasRizzo/ScoreboardCtrl), there is no GL-MT300N-V2 / OpenWrt hop.
+Embassy firmware: the Pico broadcasts an open **Scoreboard** AP and serves the UI itself.
 
 Join **Scoreboard**, then open **`http://192.168.0.1/`**. That IP always stays on the Pico, even if the phone still has mobile data. `http://scoreboard.local/` (mDNS) and `http://scoreboard.com/` (DNS hijack) also work when the phone uses the AP’s DNS.
 
