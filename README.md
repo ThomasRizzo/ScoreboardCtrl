@@ -1,8 +1,10 @@
 # ScoreboardCtrl2
 
-Embassy firmware for a Raspberry Pi Pico W that runs an open Wi-Fi AP and a phone UI for a GameCraft SK2229R scoreboard. No extra router is required.
+Web UI for a GameCraft [SK2229R](https://www.amazon.com/BSN-Multisport-Indoor-Tabletop-Scoreboard/dp/B003SFP4CI) tabletop scoreboard. The included remote cannot reset the clock; this Pico W firmware can, and it drives start/stop and home/away scores from a phone.
 
-Join the **Scoreboard** network, then open **`http://192.168.0.1/`**. That IP always stays on the Pico, even if the phone still has mobile data. `http://scoreboard.local/` (mDNS) and `http://scoreboard.com/` (DNS hijack) also work when the phone uses the AP’s DNS.
+Embassy firmware: the Pico broadcasts an open **Scoreboard** AP and serves the UI itself. Unlike [ScoreboardCtrl](https://github.com/ThomasRizzo/ScoreboardCtrl), there is no GL-MT300N-V2 / OpenWrt hop.
+
+Join **Scoreboard**, then open **`http://192.168.0.1/`**. That IP always stays on the Pico, even if the phone still has mobile data. `http://scoreboard.local/` (mDNS) and `http://scoreboard.com/` (DNS hijack) also work when the phone uses the AP’s DNS.
 
 Default period clock is **7:30** (water polo).
 
@@ -34,6 +36,11 @@ Do not use GP0 as a blinky: that pin is the start/stop pulse.
 | Each HTTP request | `Connection: close` |
 
 ## Hardware
+
+- [GameCraft SK2229R](https://www.amazon.com/BSN-Multisport-Indoor-Tabletop-Scoreboard/dp/B003SFP4CI) scoreboard
+- [Raspberry Pi Pico W](https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.html#raspberry-pi-pico-w) — AP, UI, button pulses, UART time
+- [CD74HCT4066](https://www.ti.com/lit/ds/symlink/cd74hct4066.pdf) analog switch (scoreboard buttons are 5 V, originally CD4066BE)
+- [MAX3232](https://www.ti.com/lit/ds/symlink/max3232.pdf) RS-232 (scoreboard) to Pico TTL on GP17
 
 | Pin | Function |
 |---|---|
