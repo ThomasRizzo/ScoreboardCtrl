@@ -197,6 +197,14 @@
             margin-bottom: 8px;
             font-weight: 600;
         }
+        .build {
+            text-align: center;
+            font-size: 11px;
+            color: #555;
+            margin-top: 16px;
+            font-family: "Courier New", Courier, monospace;
+            letter-spacing: 0.04em;
+        }
     </style>
 </head>
 <body>
@@ -264,6 +272,7 @@
                 <button class="btn-led" id="btnLedOff">LED off</button>
             </div>
         </div>
+        <p class="build" id="buildInfo">v0.2.0</p>
     </div>
     <script>
         const PERIOD_MIN = 7;
@@ -340,16 +349,30 @@
 
         function onTap(el, fn) {
             let locked = false;
-            const fire = (e) => {
+            let startX = 0;
+            let startY = 0;
+            let tracking = false;
+            el.addEventListener('pointerdown', (e) => {
+                if (e.button != null && e.button !== 0) return;
+                tracking = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                try { el.setPointerCapture(e.pointerId); } catch (_) {}
+            });
+            el.addEventListener('pointerup', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
+                if (!tracking) return;
+                tracking = false;
+                const dx = e.clientX - startX;
+                const dy = e.clientY - startY;
+                if (dx * dx + dy * dy > 100) return;
                 if (e.button != null && e.button !== 0) return;
                 if (locked) return;
                 locked = true;
                 setTimeout(() => { locked = false; }, 280);
                 fn();
-            };
-            el.addEventListener('pointerup', fire);
+            });
             el.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -364,14 +387,17 @@
 
         function bindScore(id, team, delta, path) {
             onTap(document.getElementById(id), () => {
-                if (team === 'home') home = Math.max(0, home + delta);
-                else away = Math.max(0, away + delta);
+                const cur = team === 'home' ? home : away;
+                const next = Math.max(0, Math.min(99, cur + delta));
+                if (next === cur) return;
+                if (team === 'home') home = next;
+                else away = next;
                 scoreInflight += 1;
                 renderScores();
                 post(path)
                     .catch((e) => {
-                        if (team === 'home') home = Math.max(0, home - delta);
-                        else away = Math.max(0, away - delta);
+                        if (team === 'home') home = Math.max(0, Math.min(99, home - delta));
+                        else away = Math.max(0, Math.min(99, away - delta));
                         renderScores();
                         showErr(e);
                     })
@@ -409,6 +435,11 @@
         bind('btnLedOff', '/led/off');
 
         onTap(document.getElementById('btnReset'), () => {
+            const live = document.getElementById('modeBadge').dataset.sim === '0';
+            if (live) {
+                post('/api/ctrl/reset').catch(showErr);
+                return;
+            }
             const { min, sec } = readSet();
             document.getElementById('timerDisplay').textContent = fmt(min, sec);
             lastMin = min;
@@ -429,27 +460,39 @@
                 const parts = String(data.time).split(':');
                 const min = parseInt(parts[0], 10) || 0;
                 const sec = parseInt(parts[1], 10) || 0;
-                if (lastMin != null && (lastMin > 0 || lastSec > 0) && min === 0 && sec === 0) {
+                if (lastMin === 0 && lastSec > 0 && lastSec <= 2 && min === 0 && sec === 0) {
                     buzz();
                 }
                 lastMin = min;
                 lastSec = sec;
                 if (scoreInflight === 0) {
-                    home = data.home;
-                    away = data.away;
+                    home = Math.max(0, Math.min(99, data.home));
+                    away = Math.max(0, Math.min(99, data.away));
                     renderScores();
                 }
                 const badge = document.getElementById('modeBadge');
+                const setSection = document.querySelector('.timer-set-section');
                 if (data.sim) {
                     badge.textContent = 'simulate — no scoreboard attached';
                     badge.className = 'badge sim';
+                    badge.dataset.sim = '1';
+                    if (setSection) setSection.style.display = '';
                 } else {
                     badge.textContent = 'live — UART + GPIO';
                     badge.className = 'badge';
+                    badge.dataset.sim = '0';
+                    if (setSection) setSection.style.display = 'none';
                 }
                 document.getElementById('status').textContent =
                     (data.running ? 'running' : 'stopped') + ' · ' + (data.led ? 'LED on' : 'LED off');
                 document.getElementById('status').className = 'status';
+                const build = document.getElementById('buildInfo');
+                if (build && data.ver) {
+                    let t = 'v' + data.ver;
+                    if (data.git) t += ' · ' + data.git;
+                    if (data.date) t += ' · ' + data.date;
+                    build.textContent = t;
+                }
             } catch (error) {
                 document.getElementById('status').textContent = 'not connected';
                 document.getElementById('status').className = 'status err';

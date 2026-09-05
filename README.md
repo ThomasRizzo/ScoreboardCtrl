@@ -55,7 +55,9 @@ Do not use GP0 as a blinky: that pin is the start/stop pulse.
 | GP17 | UART0 RX from SK2229R, 38400 (hardware build only) |
 | Onboard LED | CYW43 gpio 0 (not GP0) |
 
-SK2229R packet (6 bytes, UART 38400): `00 \| min \| sec \| shotclock \| 3F \| crc`. Time bytes decode as `(0xFF - b) >> 1`.
+SK2229R packet (6 bytes, UART 38400): `00 | min | sec | shotclock | 3F | crc`. Time bytes decode as `(0xFF - b) >> 1`. Frames are accepted only with the `3F` marker and minutes ≤ 99 / seconds ≤ 59; a `0x00` CRC or shot-clock byte does not resync the parser. Hardware `running` follows the clock: time remaining decreasing means running, `00:00` or a frozen display means stopped (the board’s own start/stop button is independent of GP0). Scores are 0–99.
+
+The AP is open (no password). Anyone on **Scoreboard** can change the clock and scores.
 
 USB CDC: logs out; send `ENTERBOOTLOADER` to reboot into UF2 BOOTSEL.
 
@@ -65,21 +67,23 @@ Nightly Rust and `thumbv6m-none-eabi` (`rust-toolchain.toml`). Flash is UF2 over
 
 ```bash
 just setup     # toolchain, RP2040 target, elf2uf2-rs
-just test      # cargo check + clippy (sim and hardware)
-just flash     # simulate firmware (ENTERBOOTLOADER, else hold BOOTSEL)
-just flash-hw  # wired scoreboard firmware
+just test      # cargo check + clippy (sim and hardware) + host unit tests
+just flash     # simulate: ENTERBOOTLOADER on USB CDC, then UF2
+just reflash   # same as flash
+just flash-hw  # hardware firmware (same CDC bootloader path)
+just reflash-hw
 just logs      # USB CDC
 just uart-logs # UART1 GP8 @ 115200
 just --list
 ```
 
-Release ELF: `target/thumbv6m-none-eabi/release/ScoreboardCtrl`.
+Release ELF: `target/thumbv6m-none-eabi/release/scoreboard-ctrl`.
 
 ## HTTP API
 
 ```
 GET  /                         UI
-GET  /api/status               JSON: time, running, home, away, led, sim
+GET  /api/status               JSON: time, running, home, away, led, sim, ver, git, date
 POST /api/ctrl/start
 POST /api/ctrl/stop
 POST /api/ctrl/start-stop
@@ -88,7 +92,8 @@ POST /api/ctrl/home-inc
 POST /api/ctrl/home-dec
 POST /api/ctrl/away-inc
 POST /api/ctrl/away-dec
-POST /api/timer/set/{min}/{sec}
+POST /api/ctrl/scores-zero
+POST /api/timer/set/{min}/{sec}   (simulate only; hardware Reset pulses GP5)
 POST /led/on
 POST /led/off
 ```
@@ -98,7 +103,7 @@ Unknown GETs (captive-portal probes such as `/generate_204`) 302 to `http://192.
 `GET /api/status` example:
 
 ```json
-{"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":true}
+{"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":true,"ver":"0.2.0","git":"abc1234","date":"2026-09-05"}
 ```
 
 ## Layout
@@ -106,7 +111,7 @@ Unknown GETs (captive-portal probes such as `/generate_204`) 302 to `http://192.
 - `src/main.rs` — Embassy tasks, GPIO/LED, HTTP routes, USB bootloader
 - `src/net_services.rs` — DHCP, DNS hijack, mDNS (`scoreboard.local` / `sb.local`)
 - `src/ap_log.rs` — UART1 AP/captive trace (also mirrored on USB CDC)
-- `src/decode.rs` — SK2229R time-byte decode
+- `src/lib.rs` / `src/decode.rs` / `src/net_proto.rs` — host-tested clock decode and DHCP/DNS helpers
 - `index.html` — phone UI (compiled into the firmware)
 - `justfile` — setup, flash, logs
 - `cyw43-firmware/` — CYW43439 firmware + Pico W NVRAM

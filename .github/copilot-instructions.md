@@ -1,8 +1,8 @@
-# GitHub Copilot Instructions for Pico Hello
+# GitHub Copilot Instructions for ScoreboardCtrl
 
 ## Project Overview
 
-This is a Raspberry Pi Pico project that runs a WiFi-enabled web server serving HTML content.
+Embassy firmware for a Pico W that hosts an open **Scoreboard** AP and drives a GameCraft SK2229R (or a software simulator).
 
 ## Tech Stack
 
@@ -74,4 +74,4 @@ bd close <id> --reason "Done" --json
 
 ---
 
-**For detailed workflows, see [AGENTS.md](../AGENTS.md)**
+**For product details, see [README.md](../README.md)**

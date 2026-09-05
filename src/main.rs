@@ -4,9 +4,9 @@
 
 #[cfg_attr(feature = "simulate", allow(dead_code))]
 mod ap_log;
-mod decode;
 mod net_services;
 
+use core::cell::Cell;
 use cyw43::Control;
 use cyw43_pio::PioSpi;
 use embassy_rp::{
@@ -15,15 +15,16 @@ use embassy_rp::{
     gpio::{Level, Output},
     peripherals::PIO0,
     pio::Pio,
+    watchdog::Watchdog,
 };
-use core::cell::Cell;
 use embassy_sync::{
     blocking_mutex::{raw::CriticalSectionRawMutex, Mutex as BlockingMutex},
     channel::{Channel, Receiver, Sender},
     mutex::Mutex,
 };
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use embassy_usb_logger::ReceiverHandler;
+use git_testament::git_testament_macros;
 use panic_persist as _;
 use picoserve::{
     io::Read,
@@ -33,10 +34,22 @@ use picoserve::{
     routing::{get, get_service, parse_path_segment, post, PathRouterService},
     AppBuilder, AppRouter, ResponseSent,
 };
-use portable_atomic::{AtomicBool, Ordering};
-
+use portable_atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(not(feature = "simulate"))]
-use decode::decode_time_byte;
+use scoreboard_ctrl::decode::{
+    infer_running, parse_clock_packet, total_seconds, RunUpdate, PACKET_LEN, PACKET_SOF,
+};
+
+git_testament_macros!(fw);
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_HASH: &str = fw_commit_hash!();
+const GIT_DATE: &str = fw_commit_date!();
+const GIT_SHORT: &str = if GIT_HASH.len() >= 7 {
+    GIT_HASH.split_at(7).0
+} else {
+    GIT_HASH
+};
 
 embassy_rp::bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
@@ -54,11 +67,15 @@ const NET_SOCKETS: usize = WEB_TASK_POOL_SIZE + 5;
 const PULSE_MS: u64 = 50;
 const PORTAL_URL: &str = "http://192.168.0.1/";
 const UI_HTML: &str = include_str!("../index.html");
-const APPLE_SUCCESS: &str =
-    "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
+const APPLE_SUCCESS: &str = "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>";
 
 static SERVED_UI: AtomicBool = AtomicBool::new(false);
+static LAST_UI_MS: AtomicU32 = AtomicU32::new(0);
 static HTTP_LIVE: portable_atomic::AtomicU8 = portable_atomic::AtomicU8::new(0);
+
+/// After this, a new phone's Apple captive probe is 302'd again.
+const UI_CAPTIVE_MS: u32 = 90_000;
+const SCORE_MAX: u16 = 99;
 
 type Cs = CriticalSectionRawMutex;
 
@@ -174,7 +191,7 @@ impl picoserve::routing::RequestHandlerService for MarkUi {
         request: Request<'_, R>,
         response_writer: W,
     ) -> Result<ResponseSent, W::Error> {
-        SERVED_UI.store(true, Ordering::Relaxed);
+        mark_ui_served();
         log_http(&request.parts, "UI");
         picoserve::response::File::html(UI_HTML)
             .call_request_handler_service(state, path_parameters, request, response_writer)
@@ -184,6 +201,20 @@ impl picoserve::routing::RequestHandlerService for MarkUi {
 
 fn ui_page() -> impl picoserve::routing::MethodHandler {
     get_service(MarkUi)
+}
+
+fn mark_ui_served() {
+    SERVED_UI.store(true, Ordering::Relaxed);
+    LAST_UI_MS.store(Instant::now().as_millis() as u32, Ordering::Relaxed);
+}
+
+fn apple_probe_done() -> bool {
+    if !SERVED_UI.load(Ordering::Relaxed) {
+        return false;
+    }
+    let last = LAST_UI_MS.load(Ordering::Relaxed);
+    let now = Instant::now().as_millis() as u32;
+    now.wrapping_sub(last) < UI_CAPTIVE_MS
 }
 
 /// 302 to the Pico IP. Android treats this as captive and opens that URL
@@ -233,11 +264,8 @@ impl picoserve::routing::RequestHandlerService for AppleProbe {
         request: Request<'_, R>,
         response_writer: W,
     ) -> Result<ResponseSent, W::Error> {
-        let done = SERVED_UI.load(Ordering::Relaxed);
-        log_http(
-            &request.parts,
-            if done { "apple-success" } else { "302" },
-        );
+        let done = apple_probe_done();
+        log_http(&request.parts, if done { "apple-success" } else { "302" });
         let reply = if done {
             ProbeReply::AppleDone
         } else {
@@ -383,6 +411,9 @@ impl AppBuilder for AppProps {
                         away: s.away,
                         led: s.led,
                         sim: cfg!(feature = "simulate"),
+                        ver: VERSION,
+                        git: GIT_SHORT,
+                        date: GIT_DATE,
                     })
                 }),
             )
@@ -396,12 +427,14 @@ struct TimeStr {
 
 impl TimeStr {
     fn from_parts(min: u8, sec: u8) -> Self {
+        let min = min.min(99);
+        let sec = sec.min(59);
         Self {
             buf: [
-                b'0' + (min / 10) % 10,
+                b'0' + min / 10,
                 b'0' + min % 10,
                 b':',
-                b'0' + (sec / 10) % 10,
+                b'0' + sec / 10,
                 b'0' + sec % 10,
             ],
         }
@@ -423,6 +456,9 @@ struct StatusJson {
     away: u16,
     led: bool,
     sim: bool,
+    ver: &'static str,
+    git: &'static str,
+    date: &'static str,
 }
 
 async fn pulse(pin: &mut Output<'static>) {
@@ -466,123 +502,194 @@ async fn board_task(
     scoreboard: SharedScoreboard,
     receiver: Receiver<'static, Cs, Command, 8>,
 ) -> ! {
+    let mut pending_home_dec = 0u16;
+    let mut pending_away_dec = 0u16;
     loop {
-        let cmd = receiver.receive().await;
-        match cmd {
-            Command::LedOn => {
-                control.0.lock().await.gpio_set(0, true).await;
-                scoreboard.0.lock().await.led = true;
-                log::info!("LED on");
-            }
-            Command::LedOff => {
-                control.0.lock().await.gpio_set(0, false).await;
-                scoreboard.0.lock().await.led = false;
-                log::info!("LED off");
-            }
-            Command::StartStop | Command::Start | Command::Stop => {
-                let led = scoreboard.0.lock().await.led;
-                pulse(&mut io.start).await;
-                blink_onboard(control, led).await;
-                #[cfg(feature = "simulate")]
-                {
-                    let mut s = scoreboard.0.lock().await;
-                    s.running = match cmd {
-                        Command::Start => true,
-                        Command::Stop => false,
-                        _ => !s.running,
+        let cmd = if pending_home_dec > 0 || pending_away_dec > 0 {
+            receiver.try_receive().ok()
+        } else {
+            Some(receiver.receive().await)
+        };
+
+        if let Some(cmd) = cmd {
+            match cmd {
+                Command::LedOn => {
+                    control.0.lock().await.gpio_set(0, true).await;
+                    scoreboard.0.lock().await.led = true;
+                    log::info!("LED on");
+                }
+                Command::LedOff => {
+                    control.0.lock().await.gpio_set(0, false).await;
+                    scoreboard.0.lock().await.led = false;
+                    log::info!("LED off");
+                }
+                Command::StartStop | Command::Start | Command::Stop => {
+                    let led = scoreboard.0.lock().await.led;
+                    #[cfg(feature = "simulate")]
+                    {
+                        pulse(&mut io.start).await;
+                        blink_onboard(control, led).await;
+                        let mut s = scoreboard.0.lock().await;
+                        s.running = match cmd {
+                            Command::Start => true,
+                            Command::Stop => false,
+                            _ => !s.running,
+                        };
+                        log::info!("sim running={}", s.running);
+                    }
+                    #[cfg(not(feature = "simulate"))]
+                    {
+                        // Physical start/stop on the SK2229R can change the clock
+                        // independently. Only pulse when our UART-inferred flag
+                        // disagrees with the requested state; UART remains truth.
+                        let running = scoreboard.0.lock().await.running;
+                        let pulse_needed = match cmd {
+                            Command::Start => !running,
+                            Command::Stop => running,
+                            _ => true,
+                        };
+                        if pulse_needed {
+                            pulse(&mut io.start).await;
+                            let mut s = scoreboard.0.lock().await;
+                            s.running = match cmd {
+                                Command::Start => true,
+                                Command::Stop => false,
+                                _ => !running,
+                            };
+                        }
+                        blink_onboard(control, led).await;
+                        log::info!("start/stop pulse={} was_running={}", pulse_needed, running);
+                    }
+                }
+                Command::HomeInc => {
+                    let (do_hw, led) = {
+                        let mut s = scoreboard.0.lock().await;
+                        let do_hw = s.home < SCORE_MAX;
+                        if do_hw {
+                            s.home += 1;
+                        }
+                        (do_hw, s.led)
                     };
-                    log::info!("sim running={}", s.running);
-                }
-                #[cfg(not(feature = "simulate"))]
-                log::info!("pulse start/stop");
-            }
-            Command::HomeInc => {
-                {
-                    let mut s = scoreboard.0.lock().await;
-                    s.home = s.home.saturating_add(1);
-                }
-                let led = scoreboard.0.lock().await.led;
-                pulse(&mut io.home_inc).await;
-                blink_onboard(control, led).await;
-                log::info!("home +");
-            }
-            Command::HomeDec => {
-                {
-                    let mut s = scoreboard.0.lock().await;
-                    s.home = s.home.saturating_sub(1);
-                }
-                let led = scoreboard.0.lock().await.led;
-                pulse(&mut io.home_dec).await;
-                blink_onboard(control, led).await;
-                log::info!("home -");
-            }
-            Command::AwayInc => {
-                {
-                    let mut s = scoreboard.0.lock().await;
-                    s.away = s.away.saturating_add(1);
-                }
-                let led = scoreboard.0.lock().await.led;
-                pulse(&mut io.away_inc).await;
-                blink_onboard(control, led).await;
-                log::info!("away +");
-            }
-            Command::AwayDec => {
-                {
-                    let mut s = scoreboard.0.lock().await;
-                    s.away = s.away.saturating_sub(1);
-                }
-                let led = scoreboard.0.lock().await.led;
-                pulse(&mut io.away_dec).await;
-                blink_onboard(control, led).await;
-                log::info!("away -");
-            }
-            Command::ScoresZero => {
-                let (home, away, led) = {
-                    let mut s = scoreboard.0.lock().await;
-                    let home = s.home;
-                    let away = s.away;
-                    s.home = 0;
-                    s.away = 0;
-                    (home, away, s.led)
-                };
-                #[cfg(not(feature = "simulate"))]
-                {
-                    for _ in 0..home {
-                        pulse(&mut io.home_dec).await;
-                    }
-                    for _ in 0..away {
-                        pulse(&mut io.away_dec).await;
+                    if do_hw {
+                        if pending_home_dec > 0 {
+                            pending_home_dec -= 1;
+                        } else {
+                            pulse(&mut io.home_inc).await;
+                        }
+                        blink_onboard(control, led).await;
+                        log::info!("home +");
                     }
                 }
-                blink_onboard(control, led).await;
-                log::info!("scores 0 (was {}-{})", home, away);
-            }
-            Command::Reset => {
-                #[cfg(feature = "simulate")]
-                {
-                    let mut s = scoreboard.0.lock().await;
-                    s.running = false;
-                    log::info!("sim reset stop {:02}:{:02}", s.minutes, s.seconds);
+                Command::HomeDec => {
+                    let (do_hw, led) = {
+                        let mut s = scoreboard.0.lock().await;
+                        let do_hw = s.home > 0;
+                        if do_hw {
+                            s.home -= 1;
+                        }
+                        (do_hw, s.led)
+                    };
+                    if do_hw {
+                        if pending_home_dec > 0 {
+                            pending_home_dec = pending_home_dec.saturating_add(1);
+                        } else {
+                            pulse(&mut io.home_dec).await;
+                        }
+                        blink_onboard(control, led).await;
+                        log::info!("home -");
+                    }
                 }
-                let led = scoreboard.0.lock().await.led;
-                pulse(&mut io.reset).await;
-                blink_onboard(control, led).await;
-                #[cfg(not(feature = "simulate"))]
-                log::info!("pulse reset");
-            }
-            Command::SetTimer { min, sec } => {
-                #[cfg(feature = "simulate")]
-                {
-                    let mut s = scoreboard.0.lock().await;
-                    s.minutes = min.min(99);
-                    s.seconds = sec.min(59);
-                    s.running = false;
-                    log::info!("sim set {:02}:{:02}", s.minutes, s.seconds);
+                Command::AwayInc => {
+                    let (do_hw, led) = {
+                        let mut s = scoreboard.0.lock().await;
+                        let do_hw = s.away < SCORE_MAX;
+                        if do_hw {
+                            s.away += 1;
+                        }
+                        (do_hw, s.led)
+                    };
+                    if do_hw {
+                        if pending_away_dec > 0 {
+                            pending_away_dec -= 1;
+                        } else {
+                            pulse(&mut io.away_inc).await;
+                        }
+                        blink_onboard(control, led).await;
+                        log::info!("away +");
+                    }
                 }
-                #[cfg(not(feature = "simulate"))]
-                log::info!("set-timer ignored (hardware mode)");
-                let _ = (min, sec);
+                Command::AwayDec => {
+                    let (do_hw, led) = {
+                        let mut s = scoreboard.0.lock().await;
+                        let do_hw = s.away > 0;
+                        if do_hw {
+                            s.away -= 1;
+                        }
+                        (do_hw, s.led)
+                    };
+                    if do_hw {
+                        if pending_away_dec > 0 {
+                            pending_away_dec = pending_away_dec.saturating_add(1);
+                        } else {
+                            pulse(&mut io.away_dec).await;
+                        }
+                        blink_onboard(control, led).await;
+                        log::info!("away -");
+                    }
+                }
+                Command::ScoresZero => {
+                    let (home, away, led) = {
+                        let mut s = scoreboard.0.lock().await;
+                        let home = s.home.min(SCORE_MAX);
+                        let away = s.away.min(SCORE_MAX);
+                        s.home = 0;
+                        s.away = 0;
+                        (home, away, s.led)
+                    };
+                    #[cfg(not(feature = "simulate"))]
+                    {
+                        pending_home_dec = home;
+                        pending_away_dec = away;
+                    }
+                    blink_onboard(control, led).await;
+                    log::info!("scores 0 (was {}-{})", home, away);
+                }
+                Command::Reset => {
+                    #[cfg(feature = "simulate")]
+                    {
+                        let mut s = scoreboard.0.lock().await;
+                        s.running = false;
+                        log::info!("sim reset stop {:02}:{:02}", s.minutes, s.seconds);
+                    }
+                    let led = scoreboard.0.lock().await.led;
+                    pulse(&mut io.reset).await;
+                    blink_onboard(control, led).await;
+                    #[cfg(not(feature = "simulate"))]
+                    log::info!("pulse reset");
+                }
+                Command::SetTimer { min, sec } => {
+                    #[cfg(feature = "simulate")]
+                    {
+                        let mut s = scoreboard.0.lock().await;
+                        s.minutes = min.min(99);
+                        s.seconds = sec.min(59);
+                        s.running = false;
+                        log::info!("sim set {:02}:{:02}", s.minutes, s.seconds);
+                    }
+                    #[cfg(not(feature = "simulate"))]
+                    log::info!("set-timer ignored (hardware mode)");
+                    let _ = (min, sec);
+                }
             }
+            continue;
+        }
+
+        if pending_home_dec > 0 {
+            pulse(&mut io.home_dec).await;
+            pending_home_dec -= 1;
+        } else if pending_away_dec > 0 {
+            pulse(&mut io.away_dec).await;
+            pending_away_dec -= 1;
         }
     }
 }
@@ -614,38 +721,71 @@ async fn read_serial(
     scoreboard: SharedScoreboard,
 ) -> ! {
     let mut byte_buf = [0; 1];
-    let mut packet_buf = [0u8; 6];
-    let mut buf_idx = 0;
+    let mut packet_buf = [0u8; PACKET_LEN];
+    let mut buf_idx = 0usize;
+    let mut prev_total: Option<u16> = None;
+    let mut last_change = Instant::now();
     log::info!("UART 38400 GP17");
     loop {
         match rx.read(&mut byte_buf).await {
             Ok(_) => {
                 let byte = byte_buf[0];
-                if byte == 0x00 {
+                if buf_idx == 0 {
+                    if byte != PACKET_SOF {
+                        continue;
+                    }
                     packet_buf[0] = byte;
                     buf_idx = 1;
-                } else if buf_idx > 0 {
-                    packet_buf[buf_idx] = byte;
-                    buf_idx += 1;
-                    if buf_idx == 6 {
-                        let raw_min = packet_buf[1];
-                        let raw_sec = packet_buf[2];
-                        let minutes = decode_time_byte(raw_min);
-                        let seconds = decode_time_byte(raw_sec);
-                        let mut s = scoreboard.0.lock().await;
-                        if s.minutes != minutes || s.seconds != seconds {
-                            s.minutes = minutes;
-                            s.seconds = seconds;
-                            log::info!(
-                                "UART {:02x}:{:02x} -> {}:{:02}",
-                                raw_min,
-                                raw_sec,
-                                minutes,
-                                seconds
-                            );
-                        }
-                        buf_idx = 0;
+                    continue;
+                }
+                packet_buf[buf_idx] = byte;
+                buf_idx += 1;
+                if buf_idx < PACKET_LEN {
+                    continue;
+                }
+                buf_idx = 0;
+                let Some((minutes, seconds)) = parse_clock_packet(&packet_buf) else {
+                    continue;
+                };
+                let total = total_seconds(minutes, seconds);
+                let now = Instant::now();
+                let Some(prev) = prev_total else {
+                    prev_total = Some(total);
+                    last_change = now;
+                    let mut s = scoreboard.0.lock().await;
+                    s.minutes = minutes;
+                    s.seconds = seconds;
+                    if total == 0 {
+                        s.running = false;
                     }
+                    log::info!("UART sync {:02}:{:02}", minutes, seconds);
+                    continue;
+                };
+                let unchanged_ms = if total == prev {
+                    now.saturating_duration_since(last_change).as_millis()
+                } else {
+                    last_change = now;
+                    0
+                };
+                let update = infer_running(prev, minutes, seconds, unchanged_ms);
+                prev_total = Some(total);
+                let mut s = scoreboard.0.lock().await;
+                let time_changed = s.minutes != minutes || s.seconds != seconds;
+                s.minutes = minutes;
+                s.seconds = seconds;
+                match update {
+                    RunUpdate::Force(running) => s.running = running,
+                    RunUpdate::Keep => {}
+                }
+                if time_changed {
+                    log::info!(
+                        "UART {:02x}:{:02x} -> {:02}:{:02} running={}",
+                        packet_buf[1],
+                        packet_buf[2],
+                        minutes,
+                        seconds,
+                        s.running
+                    );
                 }
             }
             Err(e) => {
@@ -693,6 +833,14 @@ impl embassy_usb_logger::ReceiverHandler for BootCmd {
 }
 
 #[embassy_executor::task]
+async fn watchdog_task(mut wdg: Watchdog) -> ! {
+    loop {
+        wdg.feed(Duration::from_secs(8));
+        Timer::after_secs(1).await;
+    }
+}
+
+#[embassy_executor::task]
 async fn logger_task(usb: embassy_rp::Peri<'static, embassy_rp::peripherals::USB>) {
     let driver = embassy_rp::usb::Driver::new(usb, Irqs);
     embassy_usb_logger::run!(1024, log::LevelFilter::Info, driver, BootCmd);
@@ -734,7 +882,10 @@ async fn web_task(
         let remote = socket.remote_endpoint();
         let live = HTTP_LIVE.fetch_add(1, Ordering::Relaxed).saturating_add(1);
         if live >= WEB_TASK_POOL_SIZE as u8 {
-            ap_log::emit(format_args!("tcp full {:?} live={}/{}", remote, live, WEB_TASK_POOL_SIZE));
+            ap_log::emit(format_args!(
+                "tcp full {:?} live={}/{}",
+                remote, live, WEB_TASK_POOL_SIZE
+            ));
         } else {
             ap_log::emit(format_args!(
                 "tcp+ {:?} live={}/{}",
@@ -754,6 +905,9 @@ async fn main(spawner: embassy_executor::Spawner) {
     let p = embassy_rp::init(Default::default());
 
     // USB logging must start before cyw43 init so a hang/panic is still visible.
+    let mut wdg = Watchdog::new(p.WATCHDOG);
+    wdg.start(Duration::from_secs(8));
+    spawner.spawn(watchdog_task(wdg).unwrap());
     spawner.spawn(logger_task(p.USB).unwrap());
     {
         let mut cfg = embassy_rp::uart::Config::default();
@@ -763,16 +917,18 @@ async fn main(spawner: embassy_executor::Spawner) {
     }
     Timer::after_millis(200).await;
     ap_log::emit(format_args!(
-        "boot sim={} portal={}",
+        "boot v{} {} {} sim={} portal={}",
+        VERSION,
+        GIT_SHORT,
+        GIT_DATE,
         cfg!(feature = "simulate"),
         PORTAL_URL
     ));
 
     if let Some(panic_message) = panic_persist::get_panic_message_utf8() {
-        loop {
-            log::error!("{panic_message}");
-            Timer::after_secs(5).await;
-        }
+        // Reading clears the dump so the next boot is not stuck. Keep serving.
+        log::error!("last panic: {panic_message}");
+        ap_log::emit(format_args!("last panic: {panic_message}"));
     }
 
     let fw = cyw43::aligned_bytes!("../cyw43-firmware/43439A0.bin");

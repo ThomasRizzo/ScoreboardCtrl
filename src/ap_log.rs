@@ -69,7 +69,7 @@ pub fn format_qname(pkt: &[u8], out: &mut [u8]) -> usize {
             if i + 1 >= pkt.len() {
                 break;
             }
-            i = (((len & 0x3F) as usize) << 8) | (pkt[i + 1] as usize);
+            i = ((len & 0x3F) << 8) | (pkt[i + 1] as usize);
             continue;
         }
         if i + 1 + len > pkt.len() {

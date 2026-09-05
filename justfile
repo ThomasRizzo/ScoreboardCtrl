@@ -5,13 +5,13 @@
 #
 #   just setup    first time on a machine
 #   just test     compile-check + clippy
-#   just flash    hold BOOTSEL, plug in, then run
+#   just reflash  ENTERBOOTLOADER on USB CDC, then UF2 (or hold BOOTSEL)
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
 
 target := "thumbv6m-none-eabi"
-bin := "ScoreboardCtrl"
+bin := "scoreboard-ctrl"
 elf_release := "target" / target / "release" / bin
 uf2_release := elf_release + ".uf2"
 serial := "/dev/ttyACM0"
@@ -61,8 +61,8 @@ release:
 release-hw:
     cargo build --release --no-default-features
 
-# Compile-check + clippy for sim and hardware cfgs
-test: check clippy check-hw
+# Compile-check + clippy for sim and hardware cfgs, plus host unit tests
+test: check clippy check-hw clippy-hw test-host
 
 # Format Rust sources with rustfmt
 fmt:
@@ -76,40 +76,74 @@ fmt-check:
 clippy:
     cargo clippy -- -W clippy::all
 
-# Ask running firmware to reboot into USB BOOTSEL (sends ENTERBOOTLOADER)
+# Lint hardware (no simulate) build
+clippy-hw:
+    cargo clippy --no-default-features -- -W clippy::all
+
+# Host tests for decode + DHCP/DNS helpers
+test-host:
+    cargo test --lib --target x86_64-unknown-linux-gnu
+
+# Send ENTERBOOTLOADER on USB CDC (ttyACM) so the Pico reboots into UF2 BOOTSEL.
 enter-bootloader SERIAL=serial:
     #!/usr/bin/env bash
+    bootsel_dir() {
+      for p in "/run/media/${USER}/RPI-RP2" "/media/${USER}/RPI-RP2" "/mnt/RPI-RP2"; do
+        if [[ -d "$p" ]]; then echo "$p"; return 0; fi
+      done
+      return 1
+    }
     port="{{ SERIAL }}"
-    dest=""
-    for p in "/run/media/${USER}/RPI-RP2" "/media/${USER}/RPI-RP2"; do
-      if [[ -d "$p" ]]; then dest="$p"; break; fi
-    done
-    if [[ -n "$dest" ]]; then
+    if dest="$(bootsel_dir)"; then
       echo "already in BOOTSEL at $dest"
       exit 0
     fi
     if [[ ! -e "$port" ]]; then
       echo "no serial $port and no RPI-RP2 volume"
+      ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true
       exit 1
     fi
-    printf 'ENTERBOOTLOADER' > "$port" || true
-    for _ in $(seq 1 20); do
-      for p in "/run/media/${USER}/RPI-RP2" "/media/${USER}/RPI-RP2"; do
-        if [[ -d "$p" ]]; then echo "BOOTSEL mounted at $p"; exit 0; fi
-      done
+    echo "sending ENTERBOOTLOADER on $port"
+    if command -v python3 >/dev/null && python3 -c "import serial" 2>/dev/null; then
+      python3 - "$port" <<'PY'
+    import sys, serial, time
+    ser = serial.Serial(sys.argv[1], 115200, timeout=1, write_timeout=1)
+    ser.dtr = True
+    time.sleep(0.05)
+    ser.write(b"ENTERBOOTLOADER")
+    ser.flush()
+    ser.close()
+    PY
+    else
+      stty -F "$port" 115200 raw -echo cs8 -cstopb -parenb || true
+      printf 'ENTERBOOTLOADER' > "$port" || true
+    fi
+    for _ in $(seq 1 25); do
+      if dest="$(bootsel_dir)"; then
+        echo "BOOTSEL mounted at $dest"
+        exit 0
+      fi
       sleep 0.4
     done
     echo "timed out waiting for RPI-RP2 after ENTERBOOTLOADER"
+    ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true
     exit 1
 
-# Flash simulator firmware. Tries ENTERBOOTLOADER, else needs BOOTSEL.
-flash: release
-    just enter-bootloader || true
+# ENTERBOOTLOADER over USB CDC, then copy the release UF2 (simulator).
+reflash: release
+    just enter-bootloader
     elf2uf2-rs -d {{ elf_release }}
 
-# Flash hardware firmware (UART 38400 + GPIO pulses, no sim clock)
-flash-hw:
-    cargo run --release --no-default-features
+# ENTERBOOTLOADER over USB CDC, then copy the hardware UF2.
+reflash-hw: release-hw
+    just enter-bootloader
+    elf2uf2-rs -d {{ elf_release }}
+
+# Flash simulator firmware (same as reflash; hold BOOTSEL if CDC is down).
+flash: reflash
+
+# Flash hardware firmware (UART 38400 + GPIO pulses, no sim clock).
+flash-hw: reflash-hw
 
 # Alias for flash
 deploy: flash
@@ -205,8 +239,8 @@ logs SERIAL=serial:
     fi
     just _serial_follow "$port"
 
-# fmt-check + clippy + release build (no hardware)
-ci: fmt-check clippy release
+# fmt-check + clippy + host tests + release build (no hardware)
+ci: fmt-check clippy clippy-hw test-host release
 
 # Build and open rustdoc, including private items
 doc:
