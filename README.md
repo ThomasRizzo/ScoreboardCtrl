@@ -6,7 +6,7 @@ Embassy firmware: the Pico broadcasts an open **Scoreboard** AP and serves the U
 
 Join **Scoreboard**, then open **`http://192.168.0.1/`**. That IP always stays on the Pico, even if the phone still has mobile data. `http://scoreboard.local/` (mDNS) and `http://scoreboard.com/` (DNS hijack) also work when the phone uses the AP’s DNS.
 
-Default period clock is **7:30** (water polo).
+Default period clock is **7:30** (polo).
 
 ## Modes
 
