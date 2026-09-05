@@ -154,6 +154,35 @@ size: release
     fi
     "$size_bin" -A {{ elf_release }}
 
+# Strip CR so firmware `\r\n` does not become a blank line (TTY ICRNL / miniterm).
+_serial_follow port:
+    #!/usr/bin/env bash
+    port="{{ port }}"
+    if command -v python3 >/dev/null && python3 -c "import serial" 2>/dev/null; then
+      python3 - "$port" <<'PY'
+    import sys
+    import serial
+    ser = serial.Serial(sys.argv[1], 115200, timeout=0.2)
+    buf = b""
+    try:
+        while True:
+            chunk = ser.read(256)
+            if not chunk:
+                continue
+            buf += chunk.replace(b"\r", b"")
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                sys.stdout.buffer.write(line + b"\n")
+                sys.stdout.flush()
+    except KeyboardInterrupt:
+        pass
+    PY
+    else
+      stty -F "$port" 115200 raw -echo -icrnl -inlcr -igncr cs8 -cstopb -parenb || true
+      # tr -d '\r' so leftover CR cannot become an extra newline
+      tr -d '\r' < "$port"
+    fi
+
 # UART1 TX on GP8 (115200 8N1, GND + GP8). USB CDC still on ACM0 via `just logs`.
 uart-logs SERIAL="/dev/ttyUSB0":
     #!/usr/bin/env bash
@@ -163,16 +192,7 @@ uart-logs SERIAL="/dev/ttyUSB0":
       ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true
       exit 1
     fi
-    if command -v python3 >/dev/null && python3 -c "import serial.tools.miniterm" 2>/dev/null; then
-      python3 -m serial.tools.miniterm "$port" 115200 --raw
-    elif command -v picocom >/dev/null; then
-      picocom -b 115200 --imap lfcrlf "$port"
-    elif command -v screen >/dev/null; then
-      screen "$port" 115200
-    else
-      echo "reading $port (Ctrl-C to stop)"
-      cat "$port"
-    fi
+    just _serial_follow "$port"
 
 # USB CDC log stream from embassy-usb-logger
 logs SERIAL=serial:
@@ -183,16 +203,7 @@ logs SERIAL=serial:
       ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true
       exit 1
     fi
-    if command -v python3 >/dev/null && python3 -c "import serial.tools.miniterm" 2>/dev/null; then
-      python3 -m serial.tools.miniterm "$port" 115200 --raw
-    elif command -v picocom >/dev/null; then
-      picocom -b 115200 --imap lfcrlf "$port"
-    elif command -v screen >/dev/null; then
-      screen "$port" 115200
-    else
-      echo "reading $port (Ctrl-C to stop); install python-pyserial, picocom, or screen for a nicer TTY"
-      cat "$port"
-    fi
+    just _serial_follow "$port"
 
 # fmt-check + clippy + release build (no hardware)
 ci: fmt-check clippy release
