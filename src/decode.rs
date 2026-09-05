@@ -50,6 +50,27 @@ pub enum RunUpdate {
     Keep,
 }
 
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// Write `aa bb cc` into `out`. Returns bytes written.
+pub fn write_hex(data: &[u8], out: &mut [u8]) -> usize {
+    let mut i = 0;
+    for (k, &b) in data.iter().enumerate() {
+        let need = if k == 0 { 2 } else { 3 };
+        if i + need > out.len() {
+            break;
+        }
+        if k > 0 {
+            out[i] = b' ';
+            i += 1;
+        }
+        out[i] = HEX[(b >> 4) as usize];
+        out[i + 1] = HEX[(b & 0x0f) as usize];
+        i += 2;
+    }
+    i
+}
+
 pub fn infer_running(prev_total: u16, min: u8, sec: u8, unchanged_ms: u64) -> RunUpdate {
     let total = total_seconds(min, sec);
     if total == 0 {
@@ -116,5 +137,12 @@ mod tests {
             RunUpdate::Force(false)
         );
         assert_eq!(infer_running(5 * 60, 7, 30, 0), RunUpdate::Force(false));
+    }
+
+    #[test]
+    fn write_hex_spaces() {
+        let mut out = [0u8; 16];
+        let n = write_hex(&[0x00, 0xab, 0x3f], &mut out);
+        assert_eq!(&out[..n], b"00 ab 3f");
     }
 }

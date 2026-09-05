@@ -55,7 +55,7 @@ Do not use GP0 as a blinky: that pin is the start/stop pulse.
 | USB CDC | VSP: all logs out, `ENTERBOOTLOADER` in (`just logs`, typically `/dev/ttyACM0`) |
 | Onboard LED | CYW43 gpio 0 (not GP0) |
 
-SK2229R packet (6 bytes, UART 38400): `00 | min | sec | shotclock | 3F | crc`. Time bytes decode as `(0xFF - b) >> 1`. Frames are accepted only with the `3F` marker and minutes ≤ 99 / seconds ≤ 59; a `0x00` CRC or shot-clock byte does not resync the parser. Hardware `running` follows the clock: time remaining decreasing means running, `00:00` or a frozen display means stopped (the board’s own start/stop button is independent of GP0). Scores are 0–99.
+SK2229R packet (6 bytes, UART 38400): `00 | min | sec | shotclock | 3F | crc`. Time bytes decode as `(0xFF - b) >> 1`. Frames are accepted only with the `3F` marker and minutes ≤ 99 / seconds ≤ 59; a `0x00` CRC or shot-clock byte does not resync the parser. Hardware builds dump every UART0 byte as hex on USB CDC (`just logs`) so unused fields (shot clock, CRC) and any other traffic are visible. Hardware `running` follows the clock: time remaining decreasing means running, `00:00` or a frozen display means stopped (the board’s own start/stop button is independent of GP0). Scores are 0–99.
 
 The AP is open (no password). Anyone on **Scoreboard** can change the clock and scores.
 

@@ -37,7 +37,7 @@ use picoserve::{
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(not(feature = "simulate"))]
 use scoreboard_ctrl::decode::{
-    infer_running, parse_clock_packet, total_seconds, RunUpdate, PACKET_LEN, PACKET_SOF,
+    infer_running, parse_clock_packet, total_seconds, write_hex, RunUpdate, PACKET_LEN, PACKET_SOF,
 };
 
 git_testament_macros!(fw);
@@ -722,13 +722,23 @@ async fn read_serial(
     let mut byte_buf = [0; 1];
     let mut packet_buf = [0u8; PACKET_LEN];
     let mut buf_idx = 0usize;
+    let mut raw = [0u8; 16];
+    let mut raw_n = 0usize;
     let mut prev_total: Option<u16> = None;
     let mut last_change = Instant::now();
-    log::info!("UART 38400 GP17");
+    log::info!("UART 38400 GP17 raw dump on CDC");
     loop {
         match rx.read(&mut byte_buf).await {
             Ok(_) => {
                 let byte = byte_buf[0];
+                raw[raw_n] = byte;
+                raw_n += 1;
+                if raw_n == raw.len() {
+                    let mut hex = [0u8; 47];
+                    let n = write_hex(&raw, &mut hex);
+                    log::info!("UART0 {}", core::str::from_utf8(&hex[..n]).unwrap_or("?"));
+                    raw_n = 0;
+                }
                 if buf_idx == 0 {
                     if byte != PACKET_SOF {
                         continue;
@@ -788,6 +798,12 @@ async fn read_serial(
                 }
             }
             Err(e) => {
+                if raw_n > 0 {
+                    let mut hex = [0u8; 47];
+                    let n = write_hex(&raw[..raw_n], &mut hex);
+                    log::info!("UART0 {}", core::str::from_utf8(&hex[..n]).unwrap_or("?"));
+                    raw_n = 0;
+                }
                 log::warn!("UART {:?}", e);
                 buf_idx = 0;
             }
