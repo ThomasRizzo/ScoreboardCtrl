@@ -217,18 +217,7 @@ _serial_follow port:
       tr -d '\r' < "$port"
     fi
 
-# UART1 TX on GP8 (115200 8N1, GND + GP8). USB CDC still on ACM0 via `just logs`.
-uart-logs SERIAL="/dev/ttyUSB0":
-    #!/usr/bin/env bash
-    port="{{ SERIAL }}"
-    if [[ ! -e "$port" ]]; then
-      echo "no serial $port — adapter RX to Pico GP8, GND to GND, 115200"
-      ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true
-      exit 1
-    fi
-    just _serial_follow "$port"
-
-# USB CDC log stream from embassy-usb-logger
+# USB CDC log stream (VSP) from embassy-usb-logger
 logs SERIAL=serial:
     #!/usr/bin/env bash
     port="{{ SERIAL }}"

@@ -51,15 +51,13 @@ Do not use GP0 as a blinky: that pin is the start/stop pulse.
 | GP3 | Away + |
 | GP4 | Away − |
 | GP5 | Hardware reset pulse |
-| GP8 | UART1 TX debug log, 115200 8N1 (adapter RX here, GND to GND) |
-| GP17 | UART0 RX from SK2229R, 38400 (hardware build only) |
+| GP17 | UART0 RX ← SK2229R TX, 38400 (hardware build, RX only) |
+| USB CDC | VSP: all logs out, `ENTERBOOTLOADER` in (`just logs`, typically `/dev/ttyACM0`) |
 | Onboard LED | CYW43 gpio 0 (not GP0) |
 
 SK2229R packet (6 bytes, UART 38400): `00 | min | sec | shotclock | 3F | crc`. Time bytes decode as `(0xFF - b) >> 1`. Frames are accepted only with the `3F` marker and minutes ≤ 99 / seconds ≤ 59; a `0x00` CRC or shot-clock byte does not resync the parser. Hardware `running` follows the clock: time remaining decreasing means running, `00:00` or a frozen display means stopped (the board’s own start/stop button is independent of GP0). Scores are 0–99.
 
 The AP is open (no password). Anyone on **Scoreboard** can change the clock and scores.
-
-USB CDC: logs out; send `ENTERBOOTLOADER` to reboot into UF2 BOOTSEL.
 
 ## Build and flash
 
@@ -72,8 +70,7 @@ just flash     # simulate: ENTERBOOTLOADER on USB CDC, then UF2
 just reflash   # same as flash
 just flash-hw  # hardware firmware (same CDC bootloader path)
 just reflash-hw
-just logs      # USB CDC
-just uart-logs # UART1 GP8 @ 115200
+just logs      # USB CDC (VSP)
 just --list
 ```
 
@@ -103,14 +100,14 @@ Unknown GETs (captive-portal probes such as `/generate_204`) 302 to `http://192.
 `GET /api/status` example:
 
 ```json
-{"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":true,"ver":"0.2.0","git":"abc1234","date":"2026-09-05"}
+{"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":true,"ver":"0.2.1","git":"abc1234","date":"2026-09-05"}
 ```
 
 ## Layout
 
 - `src/main.rs` — Embassy tasks, GPIO/LED, HTTP routes, USB bootloader
 - `src/net_services.rs` — DHCP, DNS hijack, mDNS (`scoreboard.local` / `sb.local`)
-- `src/ap_log.rs` — UART1 AP/captive trace (also mirrored on USB CDC)
+- `src/ap_log.rs` — AP/captive trace on USB CDC (VSP)
 - `src/lib.rs` / `src/decode.rs` / `src/net_proto.rs` — host-tested clock decode and DHCP/DNS helpers
 - `index.html` — phone UI (compiled into the firmware)
 - `justfile` — setup, flash, logs

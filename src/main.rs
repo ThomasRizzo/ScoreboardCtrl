@@ -56,8 +56,7 @@ embassy_rp::bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
     UART0_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART0>;
     DMA_IRQ_0 => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
-        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>,
-        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>;
+        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>;
 });
 
 const WIFI_SSID: &str = "Scoreboard";
@@ -909,12 +908,6 @@ async fn main(spawner: embassy_executor::Spawner) {
     wdg.start(Duration::from_secs(8));
     spawner.spawn(watchdog_task(wdg).unwrap());
     spawner.spawn(logger_task(p.USB).unwrap());
-    {
-        let mut cfg = embassy_rp::uart::Config::default();
-        cfg.baudrate = 115_200;
-        let uart = embassy_rp::uart::UartTx::new(p.UART1, p.PIN_8, p.DMA_CH2, Irqs, cfg);
-        spawner.spawn(ap_log::uart_log_task(uart).unwrap());
-    }
     Timer::after_millis(200).await;
     ap_log::emit(format_args!(
         "boot v{} {} {} sim={} portal={}",
