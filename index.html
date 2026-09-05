@@ -2,280 +2,179 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scoreboard Controller</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Scoreboard</title>
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-            min-height: 100vh;
+            min-height: 100dvh;
             display: flex;
             justify-content: center;
-            align-items: center;
-            padding: 20px;
+            align-items: flex-start;
+            padding: 8px;
+            padding-bottom: 24px;
         }
-
         .container {
             background: white;
             border-radius: 12px;
             box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-            padding: 40px;
+            padding: 12px 14px 16px;
             max-width: 900px;
             width: 100%;
         }
-
-        h1 {
+        h1 { text-align: center; color: #333; margin-bottom: 2px; font-size: 20px; }
+        .badge {
             text-align: center;
-            color: #333;
-            margin-bottom: 40px;
-            font-size: 32px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            margin-bottom: 8px;
+            color: #888;
         }
-
-        /* Timer Section */
-        .timer-section {
+        .badge.sim { color: #d68910; }
+        .url-hint {
+            text-align: center;
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+        .url-hint a { color: #2a5298; font-weight: 700; text-decoration: none; }
+        .refresh-link {
+            display: block;
+            text-align: center;
+            font-size: 14px;
+            font-weight: 700;
+            color: #fff;
+            background: #2a5298;
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 8px;
+            text-decoration: none;
+        }
+        .timer-section, .timer-set-section {
             background: #f8f9fa;
             border-radius: 8px;
-            padding: 30px;
-            margin-bottom: 40px;
+            padding: 8px;
+            margin-bottom: 8px;
             text-align: center;
         }
-
         .timer-display {
-            font-size: 72px;
+            font-size: clamp(40px, 14vw, 64px);
             font-weight: bold;
             color: #1e3c72;
-            margin: 20px 0;
+            margin: 2px 0 8px;
             font-family: 'Courier New', monospace;
-            letter-spacing: 4px;
+            letter-spacing: 2px;
+            line-height: 1;
         }
-
-        .timer-controls {
+        .timer-controls, .led-controls {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             justify-content: center;
-            flex-wrap: wrap;
-            margin-top: 20px;
+            flex-wrap: nowrap;
         }
-
         button {
-            padding: 12px 24px;
-            font-size: 16px;
+            padding: 10px 14px;
+            font-size: 14px;
+            min-height: 44px;
             border: none;
             border-radius: 6px;
             cursor: pointer;
             font-weight: 600;
-            transition: all 0.3s ease;
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 0.5px;
+            flex: 1;
+            touch-action: manipulation;
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-tap-highlight-color: transparent;
         }
-
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-        }
-
-        button:active {
-            transform: translateY(0);
-        }
-
-        .btn-primary {
-            background: #2a5298;
-            color: white;
-        }
-
-        .btn-primary:hover {
-            background: #1e3c72;
-        }
-
-        .btn-success {
-            background: #27ae60;
-            color: white;
-        }
-
-        .btn-success:hover {
-            background: #229954;
-        }
-
-        .btn-danger {
-            background: #e74c3c;
-            color: white;
-        }
-
-        .btn-danger:hover {
-            background: #c0392b;
-        }
-
-        .btn-warning {
-            background: #f39c12;
-            color: white;
-        }
-
-        .btn-warning:hover {
-            background: #d68910;
-        }
-
-        /* Timer Set Section */
-        .timer-set-section {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 40px;
-        }
-
+        button:active { opacity: 0.75; }
+        .btn-primary { background: #2a5298; color: white; }
+        .btn-success { background: #27ae60; color: white; }
+        .btn-danger { background: #e74c3c; color: white; }
+        .btn-warning { background: #f39c12; color: white; }
+        .btn-led { background: #7f8c8d; color: white; }
         .timer-set-group {
             display: flex;
-            gap: 10px;
+            gap: 8px;
             align-items: flex-end;
-            flex-wrap: wrap;
+            justify-content: center;
         }
-
-        .input-group {
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-        }
-
+        .input-group { display: flex; flex-direction: column; gap: 2px; }
         .input-group label {
-            font-size: 12px;
-            font-weight: 600;
-            color: #666;
-            text-transform: uppercase;
+            font-size: 10px; font-weight: 600; color: #666; text-transform: uppercase;
         }
-
         .input-group input {
-            padding: 10px;
-            border: 2px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-            width: 80px;
+            padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 16px; width: 64px;
         }
-
-        .input-group input:focus {
-            outline: none;
-            border-color: #2a5298;
-        }
-
-        /* Scores Section */
         .scores-section {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 30px;
-            margin-bottom: 40px;
+            gap: 8px;
+            margin-bottom: 8px;
         }
-
         .score-box {
             background: #f8f9fa;
             border-radius: 8px;
-            padding: 30px;
+            padding: 8px 6px 10px;
             text-align: center;
             border: 3px solid #ddd;
-            transition: all 0.3s ease;
         }
-
-        .score-box.home {
-            border-color: #27ae60;
-        }
-
-        .score-box.away {
-            border-color: #e74c3c;
-        }
-
+        .score-box.home { border-color: #27ae60; }
+        .score-box.away { border-color: #e74c3c; }
         .score-label {
-            font-size: 18px;
-            font-weight: 600;
-            color: #666;
-            margin-bottom: 10px;
-            text-transform: uppercase;
-            letter-spacing: 2px;
+            font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 1px;
         }
-
         .score-display {
-            font-size: 64px;
+            font-size: clamp(36px, 12vw, 56px);
             font-weight: bold;
-            margin: 20px 0;
+            margin: 2px 0 8px;
             font-family: 'Courier New', monospace;
+            line-height: 1;
         }
-
-        .score-box.home .score-display {
-            color: #27ae60;
-        }
-
-        .score-box.away .score-display {
-            color: #e74c3c;
-        }
-
-        .score-controls {
-            display: flex;
-            gap: 10px;
-            justify-content: center;
-        }
-
-        .btn-score {
-            width: 50px;
-            height: 50px;
-            font-size: 24px;
-            padding: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-
-        /* Responsive */
-        @media (max-width: 600px) {
-            .container {
-                padding: 20px;
-            }
-
-            h1 {
-                font-size: 24px;
-                margin-bottom: 30px;
-            }
-
-            .timer-display {
-                font-size: 48px;
-            }
-
-            .score-display {
-                font-size: 48px;
-            }
-
-            .scores-section {
-                grid-template-columns: 1fr;
-            }
-
-            .timer-controls {
-                flex-direction: column;
-            }
-
-            button {
-                width: 100%;
-            }
-        }
-
-        /* Status message */
-        .status {
+        .score-box.home .score-display { color: #27ae60; }
+        .score-box.away .score-display { color: #e74c3c; }
+        .score-controls { display: flex; gap: 8px; justify-content: center; }
+        .btn-score { flex: 0 0 48px; width: 48px; height: 48px; min-height: 48px; font-size: 26px; padding: 0; }
+        .status { text-align: center; color: #666; font-size: 12px; min-height: 16px; margin-top: 4px; }
+        .status.err { color: #c0392b; }
+        .led-section {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 48px;
             text-align: center;
-            color: #666;
-            font-size: 14px;
-            margin-top: 20px;
-            min-height: 20px;
+        }
+        .led-section h2 {
+            font-size: 12px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+            font-weight: 600;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>Scoreboard Controller</h1>
+        <h1>Scoreboard</h1>
+        <p class="url-hint">
+            <a href="http://192.168.0.1/" target="_blank" rel="noopener">http://192.168.0.1</a>
+            ·
+            <a href="http://scoreboard.local/" target="_blank" rel="noopener">scoreboard.local</a>
+        </p>
+        <a class="refresh-link" href="http://192.168.0.1/">Refresh</a>
+        <div class="badge" id="modeBadge">connecting…</div>
 
-        <!-- Timer Section -->
         <div class="timer-section">
-            <h2 style="color: #666; font-size: 18px; margin-bottom: 10px;">TIMER</h2>
-            <div class="timer-display" id="timerDisplay">00:00</div>
+            <div class="timer-display" id="timerDisplay">07:30</div>
             <div class="timer-controls">
                 <button class="btn-success" id="btnStart">Start</button>
                 <button class="btn-danger" id="btnStop">Stop</button>
@@ -283,34 +182,31 @@
             </div>
         </div>
 
-        <!-- Timer Set Section -->
         <div class="timer-set-section">
             <div class="timer-set-group">
                 <div class="input-group">
-                    <label for="inputMinutes">Minutes</label>
-                    <input type="number" id="inputMinutes" min="0" max="99" value="0">
+                    <label for="inputMinutes">Min</label>
+                    <input type="number" id="inputMinutes" min="0" max="99" value="7" inputmode="numeric">
                 </div>
                 <div class="input-group">
-                    <label for="inputSeconds">Seconds</label>
-                    <input type="number" id="inputSeconds" min="0" max="59" value="0">
+                    <label for="inputSeconds">Sec</label>
+                    <input type="number" id="inputSeconds" min="0" max="59" value="30" inputmode="numeric">
                 </div>
-                <button class="btn-primary" id="btnSetTimer">Set Timer</button>
+                <button class="btn-primary" id="btnSetTimer">Set</button>
             </div>
         </div>
 
-        <!-- Scores Section -->
         <div class="scores-section">
             <div class="score-box home">
-                <div class="score-label">Home Team</div>
+                <div class="score-label">Home</div>
                 <div class="score-display" id="homeScore">0</div>
                 <div class="score-controls">
                     <button class="btn-success btn-score" id="btnHomeInc">+</button>
                     <button class="btn-danger btn-score" id="btnHomeDec">−</button>
                 </div>
             </div>
-
             <div class="score-box away">
-                <div class="score-label">Away Team</div>
+                <div class="score-label">Away</div>
                 <div class="score-display" id="awayScore">0</div>
                 <div class="score-controls">
                     <button class="btn-success btn-score" id="btnAwayInc">+</button>
@@ -320,79 +216,141 @@
         </div>
 
         <div class="status" id="status"></div>
+
+        <div class="led-section">
+            <h2>Onboard LED</h2>
+            <div class="led-controls">
+                <button class="btn-led" id="btnLedOn">LED on</button>
+                <button class="btn-led" id="btnLedOff">LED off</button>
+            </div>
+        </div>
     </div>
-
     <script>
-        // State management
-        let lastTime = null;
-        let lastHome = null;
-        let lastAway = null;
+        const PERIOD_MIN = 7;
+        const PERIOD_SEC = 30;
 
-        // Timer controls
-        document.getElementById('btnStart').addEventListener('click', () => {
-            fetch('/api/timer/start', { method: 'POST' });
+        let inflight = false;
+        let home = 0;
+        let away = 0;
+        let scoreInflight = 0;
+
+        function pad(n) { return String(n).padStart(2, '0'); }
+        function fmt(min, sec) { return pad(min) + ':' + pad(sec); }
+
+        function renderScores() {
+            document.getElementById('homeScore').textContent = home;
+            document.getElementById('awayScore').textContent = away;
+        }
+
+        function post(path) {
+            return fetch(path, { method: 'POST', cache: 'no-store' }).then((res) => {
+                if (!res.ok) throw new Error(path + ' ' + res.status);
+            });
+        }
+
+        function showErr(e) {
+            document.getElementById('status').textContent = e.message || String(e);
+            document.getElementById('status').className = 'status err';
+        }
+
+        function onTap(el, fn) {
+            let locked = false;
+            const fire = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (e.button != null && e.button !== 0) return;
+                if (locked) return;
+                locked = true;
+                setTimeout(() => { locked = false; }, 280);
+                fn();
+            };
+            el.addEventListener('pointerup', fire);
+            el.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            });
+        }
+
+        function bind(id, path) {
+            onTap(document.getElementById(id), () => {
+                post(path).catch(showErr);
+            });
+        }
+
+        function bindScore(id, team, delta, path) {
+            onTap(document.getElementById(id), () => {
+                if (team === 'home') home = Math.max(0, home + delta);
+                else away = Math.max(0, away + delta);
+                scoreInflight += 1;
+                renderScores();
+                post(path)
+                    .catch((e) => {
+                        if (team === 'home') home = Math.max(0, home - delta);
+                        else away = Math.max(0, away - delta);
+                        renderScores();
+                        showErr(e);
+                    })
+                    .finally(() => {
+                        scoreInflight = Math.max(0, scoreInflight - 1);
+                    });
+            });
+        }
+
+        bind('btnStart', '/api/ctrl/start');
+        bind('btnStop', '/api/ctrl/stop');
+        bind('btnReset', '/api/ctrl/reset');
+        bindScore('btnHomeInc', 'home', 1, '/api/ctrl/home-inc');
+        bindScore('btnHomeDec', 'home', -1, '/api/ctrl/home-dec');
+        bindScore('btnAwayInc', 'away', 1, '/api/ctrl/away-inc');
+        bindScore('btnAwayDec', 'away', -1, '/api/ctrl/away-dec');
+        bind('btnLedOn', '/led/on');
+        bind('btnLedOff', '/led/off');
+
+        onTap(document.getElementById('btnReset'), () => {
+            document.getElementById('timerDisplay').textContent = fmt(PERIOD_MIN, PERIOD_SEC);
         });
 
-        document.getElementById('btnStop').addEventListener('click', () => {
-            fetch('/api/timer/stop', { method: 'POST' });
+        onTap(document.getElementById('btnSetTimer'), () => {
+            const min = Math.max(0, Math.min(99, parseInt(document.getElementById('inputMinutes').value, 10) || 0));
+            const sec = Math.max(0, Math.min(59, parseInt(document.getElementById('inputSeconds').value, 10) || 0));
+            document.getElementById('timerDisplay').textContent = fmt(min, sec);
+            post('/api/timer/set/' + min + '/' + sec).catch(showErr);
         });
 
-        document.getElementById('btnReset').addEventListener('click', () => {
-            fetch('/api/timer/reset', { method: 'POST' });
-        });
-
-        document.getElementById('btnSetTimer').addEventListener('click', () => {
-            const min = parseInt(document.getElementById('inputMinutes').value) || 0;
-            const sec = parseInt(document.getElementById('inputSeconds').value) || 0;
-            const totalSeconds = min * 60 + sec;
-            
-            // TODO: implement with query params or body parsing on backend
-            fetch(`/api/timer/set?min=${min}&sec=${sec}`, { method: 'POST' })
-                .catch(() => {
-                    // Expected to fail until set endpoint is fully implemented
-                    console.log('Timer set not yet implemented');
-                });
-        });
-
-        // Score controls
-        document.getElementById('btnHomeInc').addEventListener('click', () => {
-            fetch('/api/score/home/inc', { method: 'POST' });
-        });
-
-        document.getElementById('btnHomeDec').addEventListener('click', () => {
-            fetch('/api/score/home/dec', { method: 'POST' });
-        });
-
-        document.getElementById('btnAwayInc').addEventListener('click', () => {
-            fetch('/api/score/away/inc', { method: 'POST' });
-        });
-
-        document.getElementById('btnAwayDec').addEventListener('click', () => {
-            fetch('/api/score/away/dec', { method: 'POST' });
-        });
-
-        // Poll status every 500ms
         async function updateStatus() {
+            if (inflight) return;
+            inflight = true;
             try {
-                const response = await fetch('/api/status');
-                if (response.ok) {
-                    const data = await response.json();
-                    
-                    // Update timer display
-                    document.getElementById('timerDisplay').textContent = data.time;
-                    
-                    // Update scores
-                    document.getElementById('homeScore').textContent = data.home;
-                    document.getElementById('awayScore').textContent = data.away;
+                const response = await fetch('/api/status', { cache: 'no-store' });
+                if (!response.ok) throw new Error('status ' + response.status);
+                const data = await response.json();
+                document.getElementById('timerDisplay').textContent = data.time;
+                if (scoreInflight === 0) {
+                    home = data.home;
+                    away = data.away;
+                    renderScores();
                 }
+                const badge = document.getElementById('modeBadge');
+                if (data.sim) {
+                    badge.textContent = 'simulate — no scoreboard attached';
+                    badge.className = 'badge sim';
+                } else {
+                    badge.textContent = 'live — UART + GPIO';
+                    badge.className = 'badge';
+                }
+                document.getElementById('status').textContent =
+                    (data.running ? 'running' : 'stopped') + ' · ' + (data.led ? 'LED on' : 'LED off');
+                document.getElementById('status').className = 'status';
             } catch (error) {
-                console.error('Status update failed:', error);
+                document.getElementById('status').textContent = 'not connected';
+                document.getElementById('status').className = 'status err';
+            } finally {
+                inflight = false;
             }
         }
 
-        // Start polling every 500ms
         setInterval(updateStatus, 500);
-        updateStatus(); // Initial update
+        updateStatus();
     </script>
 </body>
 </html>

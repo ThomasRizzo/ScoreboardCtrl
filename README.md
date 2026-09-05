@@ -244,10 +244,21 @@ let gpio = async {
 
 ## Build & Run
 
+Nightly Rust and the `thumbv6m-none-eabi` target are required (`rust-toolchain.toml`). Flash is UF2 over USB BOOTSEL via `elf2uf2-rs` (see `.cargo/config.toml`).
+
+Default firmware is **simulate** mode: software timer/scores and onboard LED (no SK2229R required). Hardware mode pulses GP0–GP5 and reads time on UART0/GP17 at 38400.
+
 ```bash
-cargo build --release
-# Flash to Pico W
+just setup     # toolchain, RP2040 target, elf2uf2-rs
+just test      # cargo check + clippy (sim and hardware cfgs)
+just flash     # simulate firmware. Hold BOOTSEL, plug in Pico W
+just flash-hw  # wired scoreboard firmware
+just logs      # USB serial from embassy-usb-logger
+just --list    # all recipes
 ```
+
+Join the Pico’s open `Scoreboard` AP, then open `http://192.168.0.1/` or `http://scoreboard.com/`.
+Release ELF: `target/thumbv6m-none-eabi/release/ScoreboardCtrl`.
 
 ## Project Structure
 
