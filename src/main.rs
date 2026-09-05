@@ -71,6 +71,7 @@ enum Command {
     HomeDec,
     AwayInc,
     AwayDec,
+    ScoresZero,
     Reset,
     LedOn,
     LedOff,
@@ -354,6 +355,13 @@ impl AppBuilder for AppProps {
                 }),
             )
             .route(
+                "/api/ctrl/scores-zero",
+                post(move || async move {
+                    let _ = cmd.send(Command::ScoresZero).await;
+                    "OK"
+                }),
+            )
+            .route(
                 (
                     "/api/timer/set",
                     parse_path_segment::<u8>(),
@@ -528,14 +536,33 @@ async fn board_task(
                 blink_onboard(control, led).await;
                 log::info!("away -");
             }
+            Command::ScoresZero => {
+                let (home, away, led) = {
+                    let mut s = scoreboard.0.lock().await;
+                    let home = s.home;
+                    let away = s.away;
+                    s.home = 0;
+                    s.away = 0;
+                    (home, away, s.led)
+                };
+                #[cfg(not(feature = "simulate"))]
+                {
+                    for _ in 0..home {
+                        pulse(&mut io.home_dec).await;
+                    }
+                    for _ in 0..away {
+                        pulse(&mut io.away_dec).await;
+                    }
+                }
+                blink_onboard(control, led).await;
+                log::info!("scores 0 (was {}-{})", home, away);
+            }
             Command::Reset => {
                 #[cfg(feature = "simulate")]
                 {
                     let mut s = scoreboard.0.lock().await;
-                    s.minutes = PERIOD_MIN;
-                    s.seconds = PERIOD_SEC;
                     s.running = false;
-                    log::info!("sim reset clock {:02}:{:02}", PERIOD_MIN, PERIOD_SEC);
+                    log::info!("sim reset stop {:02}:{:02}", s.minutes, s.seconds);
                 }
                 let led = scoreboard.0.lock().await.led;
                 pulse(&mut io.reset).await;

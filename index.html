@@ -6,28 +6,40 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#0a0a0c">
     <title>Scoreboard</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            font-family: Arial, Helvetica, sans-serif;
+            background: #1c1c20;
             min-height: 100dvh;
             display: flex;
             justify-content: center;
             align-items: flex-start;
             padding: 8px;
             padding-bottom: 24px;
+            color: #ddd;
         }
         .container {
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            background: linear-gradient(180deg, #2c2c32 0%, #141418 28%, #0a0a0c 100%);
+            border-radius: 22px;
+            border: 4px solid #0e0e10;
+            box-shadow:
+                inset 0 1px 0 #5a5a62,
+                0 10px 28px rgba(0, 0, 0, 0.55);
             padding: 12px 14px 16px;
             max-width: 900px;
             width: 100%;
         }
-        h1 { text-align: center; color: #333; margin-bottom: 2px; font-size: 20px; }
+        h1 {
+            text-align: center;
+            color: #f4f4f4;
+            margin-bottom: 2px;
+            font-size: 18px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+        }
         .badge {
             text-align: center;
             font-size: 11px;
@@ -37,41 +49,50 @@
             margin-bottom: 8px;
             color: #888;
         }
-        .badge.sim { color: #d68910; }
+        .badge.sim { color: #ffb000; }
         .url-hint {
             text-align: center;
             font-size: 12px;
-            color: #666;
+            color: #777;
             margin-bottom: 8px;
         }
-        .url-hint a { color: #2a5298; font-weight: 700; text-decoration: none; }
+        .url-hint a { color: #ffb000; font-weight: 700; text-decoration: none; }
         .refresh-link {
             display: block;
             text-align: center;
             font-size: 14px;
             font-weight: 700;
-            color: #fff;
-            background: #2a5298;
+            color: #d4a84b;
+            background: #2a2a30;
+            border: 1px solid #3a3a22;
             border-radius: 8px;
             padding: 10px;
             margin-bottom: 8px;
             text-decoration: none;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
         .timer-section, .timer-set-section {
-            background: #f8f9fa;
-            border-radius: 8px;
-            padding: 8px;
+            background: #050506;
+            border-radius: 10px;
+            padding: 10px 8px;
             margin-bottom: 8px;
             text-align: center;
+            border: 1px solid #222;
         }
-        .timer-display {
-            font-size: clamp(40px, 14vw, 64px);
-            font-weight: bold;
-            color: #1e3c72;
-            margin: 2px 0 8px;
-            font-family: 'Courier New', monospace;
-            letter-spacing: 2px;
+        .led {
+            display: inline-block;
+            font-family: "Courier New", Courier, monospace;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: 0.08em;
             line-height: 1;
+        }
+        .led.amber { color: #ffb000; text-shadow: 0 0 6px #ff8c00, 0 0 16px rgba(255, 120, 0, 0.7); }
+        .led.red { color: #ff2a14; text-shadow: 0 0 6px #ff1a00, 0 0 14px rgba(255, 0, 0, 0.65); }
+        .timer-display {
+            font-size: clamp(44px, 16vw, 72px);
+            margin: 4px 0 10px;
         }
         .timer-controls, .led-controls {
             display: flex;
@@ -83,10 +104,10 @@
             padding: 10px 14px;
             font-size: 14px;
             min-height: 44px;
-            border: none;
+            border: 1px solid #333;
             border-radius: 6px;
             cursor: pointer;
-            font-weight: 600;
+            font-weight: 700;
             text-transform: uppercase;
             letter-spacing: 0.5px;
             flex: 1;
@@ -94,25 +115,34 @@
             user-select: none;
             -webkit-user-select: none;
             -webkit-tap-highlight-color: transparent;
+            background: #2a2a30;
+            color: #eee;
         }
         button:active { opacity: 0.75; }
-        .btn-primary { background: #2a5298; color: white; }
-        .btn-success { background: #27ae60; color: white; }
-        .btn-danger { background: #e74c3c; color: white; }
-        .btn-warning { background: #f39c12; color: white; }
-        .btn-led { background: #7f8c8d; color: white; }
+        .btn-primary { background: #3a3a42; color: #ffb000; border-color: #554400; }
+        .btn-success { background: #1a3a18; color: #7dff6a; border-color: #2a5a22; }
+        .btn-danger { background: #3a1210; color: #ff6a5a; border-color: #5a2018; }
+        .btn-warning { background: #3a2a08; color: #ffb000; border-color: #5a4400; }
+        .btn-led { background: #2a2a30; color: #bbb; }
         .timer-set-group {
             display: flex;
-            gap: 8px;
-            align-items: flex-end;
+            gap: 20px;
+            align-items: center;
             justify-content: center;
         }
-        .input-group { display: flex; flex-direction: column; gap: 2px; }
+        .input-group {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 6px;
+        }
         .input-group label {
-            font-size: 10px; font-weight: 600; color: #666; text-transform: uppercase;
+            font-size: 18px; font-weight: 700; color: #aaa;
         }
         .input-group input {
-            padding: 8px; border: 2px solid #ddd; border-radius: 4px; font-size: 16px; width: 64px;
+            padding: 8px; border: 1px solid #333; border-radius: 4px; font-size: 20px; width: 64px;
+            background: #111; color: #ffb000; font-family: "Courier New", monospace; font-weight: 700;
+            text-align: center;
         }
         .scores-section {
             display: grid;
@@ -121,40 +151,47 @@
             margin-bottom: 8px;
         }
         .score-box {
-            background: #f8f9fa;
-            border-radius: 8px;
+            background: #050506;
+            border-radius: 10px;
             padding: 8px 6px 10px;
             text-align: center;
-            border: 3px solid #ddd;
+            border: 1px solid #222;
         }
-        .score-box.home { border-color: #27ae60; }
-        .score-box.away { border-color: #e74c3c; }
         .score-label {
-            font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; letter-spacing: 1px;
+            font-size: 14px;
+            font-weight: 800;
+            color: #f4f4f4;
+            text-transform: uppercase;
+            letter-spacing: 3px;
         }
         .score-display {
-            font-size: clamp(36px, 12vw, 56px);
-            font-weight: bold;
-            margin: 2px 0 8px;
-            font-family: 'Courier New', monospace;
-            line-height: 1;
+            font-size: clamp(40px, 14vw, 64px);
+            margin: 4px 0 8px;
         }
-        .score-box.home .score-display { color: #27ae60; }
-        .score-box.away .score-display { color: #e74c3c; }
         .score-controls { display: flex; gap: 8px; justify-content: center; }
         .btn-score { flex: 0 0 48px; width: 48px; height: 48px; min-height: 48px; font-size: 26px; padding: 0; }
-        .status { text-align: center; color: #666; font-size: 12px; min-height: 16px; margin-top: 4px; }
-        .status.err { color: #c0392b; }
+        .score-clear {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 8px;
+        }
+        .score-clear button {
+            flex: 0 1 auto;
+            text-align: center;
+        }
+        .status { text-align: center; color: #888; font-size: 12px; min-height: 16px; margin-top: 4px; }
+        .status.err { color: #ff6a5a; }
         .led-section {
-            background: #f8f9fa;
-            border-radius: 8px;
+            background: #121214;
+            border-radius: 10px;
             padding: 12px;
             margin-top: 48px;
             text-align: center;
+            border: 1px solid #222;
         }
         .led-section h2 {
             font-size: 12px;
-            color: #888;
+            color: #666;
             text-transform: uppercase;
             letter-spacing: 1px;
             margin-bottom: 8px;
@@ -174,7 +211,7 @@
         <div class="badge" id="modeBadge">connecting…</div>
 
         <div class="timer-section">
-            <div class="timer-display" id="timerDisplay">07:30</div>
+            <div class="led amber timer-display" id="timerDisplay">07:30</div>
             <div class="timer-controls">
                 <button class="btn-success" id="btnStart">Start</button>
                 <button class="btn-danger" id="btnStop">Stop</button>
@@ -185,34 +222,37 @@
         <div class="timer-set-section">
             <div class="timer-set-group">
                 <div class="input-group">
-                    <label for="inputMinutes">Min</label>
-                    <input type="number" id="inputMinutes" min="0" max="99" value="7" inputmode="numeric">
+                    <input type="number" id="inputMinutes" min="0" max="99" value="7" inputmode="numeric" aria-label="minutes">
+                    <label for="inputMinutes">m</label>
                 </div>
                 <div class="input-group">
-                    <label for="inputSeconds">Sec</label>
-                    <input type="number" id="inputSeconds" min="0" max="59" value="30" inputmode="numeric">
+                    <input type="number" id="inputSeconds" min="0" max="59" value="30" inputmode="numeric" aria-label="seconds">
+                    <label for="inputSeconds">s</label>
                 </div>
-                <button class="btn-primary" id="btnSetTimer">Set</button>
             </div>
         </div>
 
         <div class="scores-section">
             <div class="score-box home">
                 <div class="score-label">Home</div>
-                <div class="score-display" id="homeScore">0</div>
+                <div class="led red score-display" id="homeScore">00</div>
                 <div class="score-controls">
                     <button class="btn-success btn-score" id="btnHomeInc">+</button>
                     <button class="btn-danger btn-score" id="btnHomeDec">−</button>
                 </div>
             </div>
             <div class="score-box away">
-                <div class="score-label">Away</div>
-                <div class="score-display" id="awayScore">0</div>
+                <div class="score-label">Guest</div>
+                <div class="led red score-display" id="awayScore">00</div>
                 <div class="score-controls">
                     <button class="btn-success btn-score" id="btnAwayInc">+</button>
                     <button class="btn-danger btn-score" id="btnAwayDec">−</button>
                 </div>
             </div>
+        </div>
+
+        <div class="score-clear">
+            <button class="btn-warning" id="btnScoresZero">Reset score</button>
         </div>
 
         <div class="status" id="status"></div>
@@ -233,13 +273,58 @@
         let home = 0;
         let away = 0;
         let scoreInflight = 0;
+        let lastMin = null;
+        let lastSec = null;
+        let audioCtx = null;
+
+        function unlockAudio() {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) return;
+            if (!audioCtx) audioCtx = new AC();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        function buzz() {
+            if (!audioCtx) return;
+            const ctx = audioCtx;
+            const t0 = ctx.currentTime;
+            const dur = 2.4;
+            const osc = ctx.createOscillator();
+            const osc2 = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'square';
+            osc2.type = 'square';
+            for (let i = 0; i < 12; i++) {
+                const t = t0 + i * 0.2;
+                const hi = (i % 2) === 0;
+                osc.frequency.setValueAtTime(hi ? 980 : 740, t);
+                osc2.frequency.setValueAtTime(hi ? 490 : 370, t);
+                gain.gain.setValueAtTime(0.0001, t);
+                gain.gain.exponentialRampToValueAtTime(0.32, t + 0.012);
+                gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+            }
+            osc.connect(gain);
+            osc2.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(t0);
+            osc2.start(t0);
+            osc.stop(t0 + dur);
+            osc2.stop(t0 + dur);
+        }
+
+        document.addEventListener('pointerdown', unlockAudio, { passive: true });
 
         function pad(n) { return String(n).padStart(2, '0'); }
         function fmt(min, sec) { return pad(min) + ':' + pad(sec); }
+        function readSet() {
+            const min = Math.max(0, Math.min(99, parseInt(document.getElementById('inputMinutes').value, 10) || 0));
+            const sec = Math.max(0, Math.min(59, parseInt(document.getElementById('inputSeconds').value, 10) || 0));
+            return { min, sec };
+        }
 
         function renderScores() {
-            document.getElementById('homeScore').textContent = home;
-            document.getElementById('awayScore').textContent = away;
+            document.getElementById('homeScore').textContent = pad(home);
+            document.getElementById('awayScore').textContent = pad(away);
         }
 
         function post(path) {
@@ -298,23 +383,39 @@
 
         bind('btnStart', '/api/ctrl/start');
         bind('btnStop', '/api/ctrl/stop');
-        bind('btnReset', '/api/ctrl/reset');
         bindScore('btnHomeInc', 'home', 1, '/api/ctrl/home-inc');
         bindScore('btnHomeDec', 'home', -1, '/api/ctrl/home-dec');
         bindScore('btnAwayInc', 'away', 1, '/api/ctrl/away-inc');
         bindScore('btnAwayDec', 'away', -1, '/api/ctrl/away-dec');
+        onTap(document.getElementById('btnScoresZero'), () => {
+            const prevHome = home;
+            const prevAway = away;
+            home = 0;
+            away = 0;
+            scoreInflight += 1;
+            renderScores();
+            post('/api/ctrl/scores-zero')
+                .catch((e) => {
+                    home = prevHome;
+                    away = prevAway;
+                    renderScores();
+                    showErr(e);
+                })
+                .finally(() => {
+                    scoreInflight = Math.max(0, scoreInflight - 1);
+                });
+        });
         bind('btnLedOn', '/led/on');
         bind('btnLedOff', '/led/off');
 
         onTap(document.getElementById('btnReset'), () => {
-            document.getElementById('timerDisplay').textContent = fmt(PERIOD_MIN, PERIOD_SEC);
-        });
-
-        onTap(document.getElementById('btnSetTimer'), () => {
-            const min = Math.max(0, Math.min(99, parseInt(document.getElementById('inputMinutes').value, 10) || 0));
-            const sec = Math.max(0, Math.min(59, parseInt(document.getElementById('inputSeconds').value, 10) || 0));
+            const { min, sec } = readSet();
             document.getElementById('timerDisplay').textContent = fmt(min, sec);
-            post('/api/timer/set/' + min + '/' + sec).catch(showErr);
+            lastMin = min;
+            lastSec = sec;
+            post('/api/timer/set/' + min + '/' + sec)
+                .then(() => post('/api/ctrl/reset'))
+                .catch(showErr);
         });
 
         async function updateStatus() {
@@ -325,6 +426,14 @@
                 if (!response.ok) throw new Error('status ' + response.status);
                 const data = await response.json();
                 document.getElementById('timerDisplay').textContent = data.time;
+                const parts = String(data.time).split(':');
+                const min = parseInt(parts[0], 10) || 0;
+                const sec = parseInt(parts[1], 10) || 0;
+                if (lastMin != null && (lastMin > 0 || lastSec > 0) && min === 0 && sec === 0) {
+                    buzz();
+                }
+                lastMin = min;
+                lastSec = sec;
                 if (scoreInflight === 0) {
                     home = data.home;
                     away = data.away;
