@@ -97,18 +97,28 @@ Measured release ACTIVE image (simulate, with cyw43 firmware + UI) is roughly **
 
 ### OTA (after the app is running)
 
-Join **Scoreboard**, then from a host on that AP:
+On a WiFi-only Linux host with NetworkManager (`nmcli`), `just ota` will:
+
+1. Remember the current WiFi connection/SSID
+2. Join the open **Scoreboard** AP
+3. Wait for `http://192.168.0.1/`
+4. `POST` the `.bin` to `/api/ota`
+5. Switch back to the previous WiFi (even if the upload fails)
 
 ```bash
-just ota
-# or:
-curl -X POST --data-binary @target/thumbv6m-none-eabi/release/scoreboard-ctrl.bin \
-  http://192.168.0.1/api/ota
+just ota                 # simulate image + WiFi hop
+just ota-hw              # hardware image + WiFi hop
+OTA_SKIP_WIFI=1 just ota # already on Scoreboard / skip hopping
 ```
+
+Phone / UI: stay on **Scoreboard**, open `http://192.168.0.1/`, use the OTA file upload.
+
+Requires `nmcli` and `curl`. Pico must already be running (AP up). USB CDC (`just logs`) still works while the laptop is on Scoreboard.
 
 Progress is logged on USB CDC. On success the device `mark_updated`s and soft-resets; embassy-boot swaps DFU→ACTIVE and the new image must call `mark_booted` (it does on startup) or the next reset rolls back.
 
 Concurrent OTAs are rejected (`503`). Truncated uploads do **not** call `mark_updated`, so the running image stays Booted and will not swap.
+
 
 ### Recovery
 

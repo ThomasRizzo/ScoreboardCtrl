@@ -2,13 +2,14 @@
 #
 # Embassy + picoserve AP on 192.168.0.1 with embassy-boot OTA.
 # First-time: flash bootloader UF2, then app UF2 (USB BOOTSEL).
-# Later updates: just ota (POST /api/ota over the Scoreboard AP).
+# Later updates: just ota (nmcli hops to Scoreboard AP, POSTs, hops back).
 #
 #   just setup           first time on a machine
 #   just test            compile-check + clippy
 #   just flash-bootloader
 #   just flash           ENTERBOOTLOADER + app UF2 (or hold BOOTSEL)
-#   just ota             HTTP OTA of release image
+#   just ota             build + WiFi hop + HTTP OTA + restore WiFi
+#   OTA_SKIP_WIFI=1 just ota   # skip hopping if already on Scoreboard
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
@@ -227,34 +228,123 @@ ota-artifact: release
     "$objcopy" -O binary {{ elf_release }} {{ ota_bin }}
     ls -lh {{ ota_bin }}
 
-# POST the OTA artifact to the Scoreboard AP (device must be up on 192.168.0.1)
-ota: ota-artifact
+# Join Scoreboard AP (NetworkManager), POST OTA, then restore prior WiFi.
+# Set OTA_SKIP_WIFI=1 to skip hopping (already on AP / Ethernet path).
+# Override SSID with: just ota wifi_ssid=Scoreboard
+wifi_ssid := "Scoreboard"
+ota_host := "192.168.0.1"
+
+# Shared WiFi hop + curl for OTA (expects {{ ota_bin }} already built)
+_ota-post BIN=ota_bin:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "POST {{ ota_url }} <- {{ ota_bin }} ($(wc -c < {{ ota_bin }}) bytes)"
+    bin="{{ BIN }}"
+    ap="{{ wifi_ssid }}"
+    url="{{ ota_url }}"
+    host="{{ ota_host }}"
+    skip="${OTA_SKIP_WIFI:-0}"
+
+    if ! command -v nmcli >/dev/null; then
+      echo "nmcli not found — install NetworkManager, or run: OTA_SKIP_WIFI=1 just ota"
+      exit 1
+    fi
+    if ! command -v curl >/dev/null; then
+      echo "curl not found"
+      exit 1
+    fi
+
+    prev_conn=""
+    prev_ssid=""
+    hopped=0
+
+    restore_wifi() {
+      if [[ "$hopped" -ne 1 ]]; then
+        return 0
+      fi
+      echo "restoring WiFi..."
+      if [[ -n "$prev_conn" ]]; then
+        if nmcli connection up id "$prev_conn"; then
+          echo "restored connection: $prev_conn"
+          return 0
+        fi
+      fi
+      if [[ -n "$prev_ssid" && "$prev_ssid" != "$ap" ]]; then
+        if nmcli device wifi connect "$prev_ssid"; then
+          echo "restored SSID: $prev_ssid"
+          return 0
+        fi
+      fi
+      echo "warning: could not restore prior WiFi; reconnect manually"
+      return 0
+    }
+    trap restore_wifi EXIT
+
+    current_ssid="$(nmcli -t -f ACTIVE,SSID device wifi 2>/dev/null | awk -F: '$1=="yes"{print $2; exit}' || true)"
+    prev_conn="$(nmcli -t -f NAME,TYPE connection show --active 2>/dev/null | awk -F: '$2=="802-11-wireless"||$2=="wifi"{print $1; exit}' || true)"
+    prev_ssid="$current_ssid"
+
+    if [[ "$skip" == "1" ]]; then
+      echo "OTA_SKIP_WIFI=1 — not changing WiFi (current SSID: ${current_ssid:-unknown})"
+    elif [[ "$current_ssid" == "$ap" ]]; then
+      echo "already on $ap"
+    else
+      echo "current WiFi: conn=${prev_conn:-none} ssid=${prev_ssid:-none}"
+      echo "connecting to open AP '$ap'..."
+      # Rescan helps when the Pico just came up
+      nmcli device wifi rescan >/dev/null 2>&1 || true
+      sleep 1
+      if ! nmcli device wifi connect "$ap"; then
+        # Retry once after another scan
+        nmcli device wifi rescan >/dev/null 2>&1 || true
+        sleep 2
+        nmcli device wifi connect "$ap"
+      fi
+      hopped=1
+      echo "joined $ap"
+    fi
+
+    echo "waiting for http://$host/ ..."
+    ok=0
+    for _ in $(seq 1 40); do
+      if curl -fsS --connect-timeout 1 -o /dev/null "http://$host/" 2>/dev/null; then
+        ok=1
+        break
+      fi
+      sleep 0.5
+    done
+    if [[ "$ok" -ne 1 ]]; then
+      echo "Pico not reachable at http://$host/ — is firmware running and AP up?"
+      exit 1
+    fi
+
+    echo "POST $url <- $bin ($(wc -c < "$bin") bytes)"
     curl -fS --connect-timeout 5 --max-time 180 \
       -X POST \
       -H "Content-Type: application/octet-stream" \
-      --data-binary @"{{ ota_bin }}" \
-      "{{ ota_url }}"
+      --data-binary @"$bin" \
+      "$url"
     echo
     echo "OTA accepted; device should soft-reset into embassy-boot. Watch: just logs"
+    # Give the AP a moment to drop before we hop home (optional)
+    sleep 1
 
-# Same as ota but hardware (no simulate) image
+# POST simulate image: build, WiFi hop to Scoreboard, upload, restore WiFi
+ota: ota-artifact
+    just _ota-post {{ ota_bin }}
+
+# POST hardware image: same WiFi hop behavior as ota
 ota-hw: release-hw
     #!/usr/bin/env bash
     set -euo pipefail
     sysroot="$(rustc --print sysroot)"
     objcopy="$(find "$sysroot" -name llvm-objcopy | head -1)"
+    if [[ -z "$objcopy" || ! -x "$objcopy" ]]; then
+      echo "llvm-objcopy not found; run: rustup component add llvm-tools-preview"
+      exit 1
+    fi
     "$objcopy" -O binary {{ elf_release }} {{ ota_bin }}
     ls -lh {{ ota_bin }}
-    curl -fS --connect-timeout 5 --max-time 180 \
-      -X POST \
-      -H "Content-Type: application/octet-stream" \
-      --data-binary @"{{ ota_bin }}" \
-      "{{ ota_url }}"
-    echo
-    echo "OTA accepted; watch: just logs"
+    just _ota-post {{ ota_bin }}
 
 # Flash / RAM section sizes of the release ELF
 size: release
