@@ -272,6 +272,15 @@
                 <button class="btn-led" id="btnLedOff">LED off</button>
             </div>
         </div>
+        <div class="led-section">
+            <h2>Firmware OTA</h2>
+            <p class="hint" style="font-size:0.85rem;opacity:0.8;margin:0.25rem 0 0.5rem">Upload a <code>scoreboard-ctrl.bin</code> from <code>just ota-artifact</code>. Device will reboot.</p>
+            <input type="file" id="otaFile" accept=".bin,application/octet-stream" />
+            <div class="led-controls" style="margin-top:0.5rem">
+                <button class="btn-led" id="btnOta">Upload &amp; reboot</button>
+            </div>
+            <p class="status" id="otaStatus"></p>
+        </div>
         <p class="build" id="buildInfo"></p>
     </div>
     <script>
@@ -500,6 +509,34 @@
                 inflight = false;
             }
         }
+
+        document.getElementById('btnOta').addEventListener('click', async () => {
+            const input = document.getElementById('otaFile');
+            const status = document.getElementById('otaStatus');
+            const file = input.files && input.files[0];
+            if (!file) {
+                status.textContent = 'choose a .bin first';
+                status.className = 'status err';
+                return;
+            }
+            status.textContent = 'uploading ' + file.size + ' bytes…';
+            status.className = 'status';
+            try {
+                const res = await fetch('/api/ota', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/octet-stream' },
+                    body: file,
+                    cache: 'no-store',
+                });
+                const text = await res.text();
+                if (!res.ok) throw new Error(text || ('HTTP ' + res.status));
+                status.textContent = 'OK — device rebooting';
+                status.className = 'status';
+            } catch (e) {
+                status.textContent = String(e.message || e);
+                status.className = 'status err';
+            }
+        });
 
         setInterval(updateStatus, 500);
         updateStatus();

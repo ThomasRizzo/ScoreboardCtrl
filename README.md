@@ -61,20 +61,60 @@ The AP is open (no password). Anyone on **Scoreboard** can change the clock and 
 
 ## Build and flash
 
-Nightly Rust and `thumbv6m-none-eabi` (`rust-toolchain.toml`). Flash is UF2 over USB BOOTSEL (`elf2uf2-rs`).
+Nightly Rust and `thumbv6m-none-eabi` (`rust-toolchain.toml`). The firmware uses **embassy-boot** (A/B): a small bootloader plus ACTIVE/DFU/STATE partitions. First-time bring-up is still UF2 over USB BOOTSEL (`elf2uf2-rs`); later updates can use HTTP OTA on the Scoreboard AP.
 
 ```bash
-just setup     # toolchain, RP2040 target, elf2uf2-rs
-just test      # cargo check + clippy (sim and hardware) + host unit tests
-just flash     # simulate: ENTERBOOTLOADER on USB CDC, then UF2
-just reflash   # same as flash
-just flash-hw  # hardware firmware (same CDC bootloader path)
-just reflash-hw
-just logs      # USB CDC (VSP)
+just setup              # toolchain, RP2040 target, elf2uf2-rs
+just test               # check + clippy (sim/hw) + bootloader + host tests
+just flash-bootloader   # once: hold BOOTSEL, copy bootloader UF2
+just flash              # simulate app via ENTERBOOTLOADER + UF2
+just flash-hw           # hardware app
+just ota                # POST release .bin to http://192.168.0.1/api/ota
+just logs               # USB CDC (VSP)
 just --list
 ```
 
-Release ELF: `target/thumbv6m-none-eabi/release/scoreboard-ctrl`.
+Release ELF: `target/thumbv6m-none-eabi/release/scoreboard-ctrl`.  
+OTA artifact: `target/thumbv6m-none-eabi/release/scoreboard-ctrl.bin` (`just ota-artifact`).
+
+### Flash map (Pico W 2 MiB)
+
+| Region | Origin | Size | Role |
+|---|---|---|---|
+| BOOT2 + bootloader | `0x10000000` | 32 KiB | stage2 + embassy-boot |
+| STATE | `0x10008000` | 4 KiB | swap / trial-boot state |
+| ACTIVE | `0x10009000` | 896 KiB | running app |
+| DFU | `0x100E9000` | 900 KiB | staged OTA image (ACTIVE + 4 KiB) |
+
+Measured release ACTIVE image (simulate, with cyw43 firmware + UI) is roughly **~460 KiB**; ACTIVE leaves ~400 KiB headroom. Re-check with `just size` / `just ota-artifact` after dependency bumps.
+
+### First-time USB flash (boxer-86)
+
+1. `just doctor`
+2. Hold **BOOTSEL**, plug USB, `just flash-bootloader`
+3. Hold **BOOTSEL** again (or wait for remount), `just flash` (or `just flash-hw`)
+4. `just logs` — expect `mark_booted ok` and the Scoreboard AP
+
+### OTA (after the app is running)
+
+Join **Scoreboard**, then from a host on that AP:
+
+```bash
+just ota
+# or:
+curl -X POST --data-binary @target/thumbv6m-none-eabi/release/scoreboard-ctrl.bin \
+  http://192.168.0.1/api/ota
+```
+
+Progress is logged on USB CDC. On success the device `mark_updated`s and soft-resets; embassy-boot swaps DFU→ACTIVE and the new image must call `mark_booted` (it does on startup) or the next reset rolls back.
+
+Concurrent OTAs are rejected (`503`). Truncated uploads do **not** call `mark_updated`, so the running image stays Booted and will not swap.
+
+### Recovery
+
+- Soft brick / bad trial image: power-cycle; embassy-boot rolls back if `mark_booted` never ran.
+- USB BOOTSEL still works: `ENTERBOOTLOADER` on CDC or hold BOOTSEL, then reflash bootloader and/or app UF2s.
+- Do not flash a pre-embassy-boot UF2 without restoring the bootloader first — a whole-flash image can overwrite the boot partitions.
 
 ## HTTP API
 
@@ -105,7 +145,10 @@ Unknown GETs (captive-portal probes such as `/generate_204`) 302 to `http://192.
 
 ## Layout
 
-- `src/main.rs` — Embassy tasks, GPIO/LED, HTTP routes, USB bootloader
+- `src/main.rs` — Embassy tasks, GPIO/LED, HTTP routes, USB BOOTSEL helper
+- `src/ota.rs` — embassy-boot `mark_booted` + `POST /api/ota`
+- `bootloader/` — embassy-boot-rp bootloader workspace member
+- `memory-app.x` — app flash map (copied to linker via `build.rs`; kept out of repo root name `memory.x` so it cannot shadow `bootloader/memory.x`)
 - `src/net_services.rs` — DHCP, DNS hijack, mDNS (`scoreboard.local` / `sb.local`)
 - `src/ap_log.rs` — AP/captive trace on USB CDC (VSP)
 - `src/lib.rs` / `src/decode.rs` / `src/net_proto.rs` — host-tested clock decode and DHCP/DNS helpers
@@ -123,3 +166,4 @@ Pico is `192.168.0.1/24`. DHCP hands out `.10`–`.17`, DNS and gateway point at
 - [picoserve](https://github.com/sammhicks/picoserve)
 - [Pico W](https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.html)
 - [cyw43](https://github.com/embassy-rs/embassy/tree/main/cyw43)
+- [embassy-boot](https://github.com/embassy-rs/embassy/tree/main/embassy-boot) (RP example bootloader/application)

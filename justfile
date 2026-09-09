@@ -1,11 +1,14 @@
 # ScoreboardCtrl — Raspberry Pi Pico W firmware
 #
-# Embassy + picoserve AP on 192.168.0.1. Flash is UF2 over USB BOOTSEL
-# (see .cargo/config.toml runner: elf2uf2-rs -sd).
+# Embassy + picoserve AP on 192.168.0.1 with embassy-boot OTA.
+# First-time: flash bootloader UF2, then app UF2 (USB BOOTSEL).
+# Later updates: just ota (POST /api/ota over the Scoreboard AP).
 #
-#   just setup    first time on a machine
-#   just test     compile-check + clippy
-#   just reflash  ENTERBOOTLOADER on USB CDC, then UF2 (or hold BOOTSEL)
+#   just setup           first time on a machine
+#   just test            compile-check + clippy
+#   just flash-bootloader
+#   just flash           ENTERBOOTLOADER + app UF2 (or hold BOOTSEL)
+#   just ota             HTTP OTA of release image
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
@@ -14,7 +17,12 @@ target := "thumbv6m-none-eabi"
 bin := "scoreboard-ctrl"
 elf_release := "target" / target / "release" / bin
 uf2_release := elf_release + ".uf2"
+bootloader_bin := "scoreboard-bootloader"
+bootloader_elf := "target" / target / "release" / bootloader_bin
+bootloader_uf2 := bootloader_elf + ".uf2"
+ota_bin := elf_release + ".bin"
 serial := "/dev/ttyACM0"
+ota_url := "http://192.168.0.1/api/ota"
 
 # List available recipes
 default:
@@ -40,6 +48,8 @@ doctor:
     @command -v probe-rs >/dev/null && echo "probe-rs:  $(command -v probe-rs)" || echo "probe-rs:  (optional)"
     @command -v picotool >/dev/null && echo "picotool:  $(command -v picotool)" || echo "picotool:  (optional)"
     @echo "serial:    {{ serial }} $(if [ -e {{ serial }} ]; then echo present; else echo 'not present'; fi)"
+    @echo "ota url:   {{ ota_url }}"
+    @echo "workspace: bootloader + scoreboard-ctrl (embassy-boot A/B)"
 
 # Type-check firmware (simulate, default)
 check:
@@ -48,6 +58,10 @@ check:
 # Type-check hardware build (UART + GPIO, no sim clock)
 check-hw:
     cargo check --no-default-features
+
+# Type-check embassy-boot bootloader
+check-bootloader:
+    cargo check -p scoreboard-bootloader --release
 
 # Debug ELF with scoreboard simulator (default)
 build:
@@ -62,7 +76,7 @@ release-hw:
     cargo build --release --no-default-features
 
 # Compile-check + clippy for sim and hardware cfgs, plus host unit tests
-test: check clippy check-hw clippy-hw test-host
+test: check clippy check-hw clippy-hw check-bootloader test-host
 
 # Format Rust sources with rustfmt
 fmt:
@@ -175,6 +189,72 @@ flash-probe: release
 flash-picotool: uf2
     picotool load -f {{ uf2_release }}
     picotool reboot
+
+
+# Build embassy-boot bootloader (release)
+build-bootloader:
+    cargo build -p scoreboard-bootloader --release
+
+# UF2 for the bootloader (flash this once before the app)
+uf2-bootloader: build-bootloader
+    elf2uf2-rs {{ bootloader_elf }} {{ bootloader_uf2 }}
+    @ls -lh {{ bootloader_uf2 }}
+
+# Copy bootloader UF2 to a mounted RPI-RP2 volume (hold BOOTSEL)
+flash-bootloader: uf2-bootloader
+    #!/usr/bin/env bash
+    dest=""
+    for p in "/media/${USER}/RPI-RP2" "/run/media/${USER}/RPI-RP2" "/mnt/RPI-RP2"; do
+      if [[ -d "$p" ]]; then dest="$p"; break; fi
+    done
+    if [[ -z "$dest" ]]; then
+      echo "RPI-RP2 volume not mounted. Hold BOOTSEL, plug in the Pico W, then retry."
+      exit 1
+    fi
+    cp {{ bootloader_uf2 }} "$dest/"
+    echo "copied {{ bootloader_uf2 }} -> $dest"
+    echo "Next: just flash   # or just flash-hw"
+
+# Raw ACTIVE-partition image for HTTP OTA (objcopy binary)
+ota-artifact: release
+    #!/usr/bin/env bash
+    sysroot="$(rustc --print sysroot)"
+    objcopy="$(find "$sysroot" -name llvm-objcopy | head -1)"
+    if [[ -z "$objcopy" || ! -x "$objcopy" ]]; then
+      echo "llvm-objcopy not found; run: rustup component add llvm-tools-preview"
+      exit 1
+    fi
+    "$objcopy" -O binary {{ elf_release }} {{ ota_bin }}
+    ls -lh {{ ota_bin }}
+
+# POST the OTA artifact to the Scoreboard AP (device must be up on 192.168.0.1)
+ota: ota-artifact
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "POST {{ ota_url }} <- {{ ota_bin }} ($(wc -c < {{ ota_bin }}) bytes)"
+    curl -fS --connect-timeout 5 --max-time 180 \
+      -X POST \
+      -H "Content-Type: application/octet-stream" \
+      --data-binary @"{{ ota_bin }}" \
+      "{{ ota_url }}"
+    echo
+    echo "OTA accepted; device should soft-reset into embassy-boot. Watch: just logs"
+
+# Same as ota but hardware (no simulate) image
+ota-hw: release-hw
+    #!/usr/bin/env bash
+    set -euo pipefail
+    sysroot="$(rustc --print sysroot)"
+    objcopy="$(find "$sysroot" -name llvm-objcopy | head -1)"
+    "$objcopy" -O binary {{ elf_release }} {{ ota_bin }}
+    ls -lh {{ ota_bin }}
+    curl -fS --connect-timeout 5 --max-time 180 \
+      -X POST \
+      -H "Content-Type: application/octet-stream" \
+      --data-binary @"{{ ota_bin }}" \
+      "{{ ota_url }}"
+    echo
+    echo "OTA accepted; watch: just logs"
 
 # Flash / RAM section sizes of the release ELF
 size: release

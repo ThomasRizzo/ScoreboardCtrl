@@ -5,20 +5,25 @@
 #[cfg_attr(feature = "simulate", allow(dead_code))]
 mod ap_log;
 mod net_services;
+mod ota;
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use cyw43::Control;
 use cyw43_pio::PioSpi;
 use embassy_rp::{
     clocks::RoscRng,
     dma,
+    flash::{Blocking, Flash},
     gpio::{Level, Output},
     peripherals::PIO0,
     pio::Pio,
     watchdog::Watchdog,
 };
 use embassy_sync::{
-    blocking_mutex::{raw::CriticalSectionRawMutex, Mutex as BlockingMutex},
+    blocking_mutex::{
+        raw::{CriticalSectionRawMutex, NoopRawMutex},
+        Mutex as BlockingMutex,
+    },
     channel::{Channel, Receiver, Sender},
     mutex::Mutex,
 };
@@ -31,7 +36,7 @@ use picoserve::{
     make_static,
     request::{Path, Request},
     response::{IntoResponse, Json, ResponseWriter, StatusCode},
-    routing::{get, get_service, parse_path_segment, post, PathRouterService},
+    routing::{get, get_service, parse_path_segment, post, post_service, PathRouterService},
     AppBuilder, AppRouter, ResponseSent,
 };
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
@@ -138,6 +143,8 @@ struct SharedScoreboard(&'static Mutex<Cs, ScoreboardState>);
 struct AppProps {
     cmd: Sender<'static, Cs, Command, 8>,
     scoreboard: SharedScoreboard,
+    flash: ota::SharedFlash,
+    watchdog: ota::SharedWatchdog,
 }
 
 struct MarkUi;
@@ -305,6 +312,8 @@ impl AppBuilder for AppProps {
     fn build_app(self) -> picoserve::Router<Self::PathRouter> {
         let cmd = self.cmd;
         let scoreboard = self.scoreboard;
+        let flash = self.flash;
+        let watchdog = self.watchdog;
         picoserve::Router::from_service(PortalFallback)
             .route("/", ui_page())
             .route("/index.html", ui_page())
@@ -414,6 +423,13 @@ impl AppBuilder for AppProps {
                         git: GIT_SHORT,
                         date: GIT_DATE,
                     })
+                }),
+            )
+            .route(
+                "/api/ota",
+                post_service(ota::OtaService {
+                    flash,
+                    watchdog,
                 }),
             )
     }
@@ -848,9 +864,9 @@ impl embassy_usb_logger::ReceiverHandler for BootCmd {
 }
 
 #[embassy_executor::task]
-async fn watchdog_task(mut wdg: Watchdog) -> ! {
+async fn watchdog_task(wdg: ota::SharedWatchdog) -> ! {
     loop {
-        wdg.feed(Duration::from_secs(8));
+        wdg.lock().await.feed(Duration::from_secs(8));
         Timer::after_secs(1).await;
     }
 }
@@ -888,7 +904,7 @@ async fn web_task(
             embassy_net::tcp::TcpSocket::new(stack, &mut tcp_rx_buffer, &mut tcp_tx_buffer);
         // picoserve's listen_and_serve hardcodes 45s idle. A closed laptop tab
         // that misses RST would pin a worker that long and block reconnects.
-        socket.set_timeout(Some(Duration::from_secs(5)));
+        socket.set_timeout(Some(Duration::from_secs(60)));
         socket.set_keep_alive(None);
         if let Err(e) = socket.accept(80).await {
             ap_log::emit(format_args!("tcp{} accept {:?}", task_id, e));
@@ -920,9 +936,19 @@ async fn main(spawner: embassy_executor::Spawner) {
     let p = embassy_rp::init(Default::default());
 
     // USB logging must start before cyw43 init so a hang/panic is still visible.
+    let flash = make_static!(
+        BlockingMutex<NoopRawMutex, RefCell<Flash<'static, embassy_rp::peripherals::FLASH, Blocking, { ota::FLASH_SIZE }>>>,
+        BlockingMutex::new(RefCell::new(Flash::<_, Blocking, { ota::FLASH_SIZE }>::new_blocking(
+            p.FLASH,
+        )))
+    );
+    // Confirm successful boot to embassy-boot (stops rollback of a trial image).
+    ota::mark_booted(flash);
+
     let mut wdg = Watchdog::new(p.WATCHDOG);
     wdg.start(Duration::from_secs(8));
-    spawner.spawn(watchdog_task(wdg).unwrap());
+    let watchdog = make_static!(Mutex<Cs, Watchdog>, Mutex::new(wdg));
+    spawner.spawn(watchdog_task(watchdog).unwrap());
     spawner.spawn(logger_task(p.USB).unwrap());
     Timer::after_millis(200).await;
     ap_log::emit(format_args!(
@@ -1033,6 +1059,8 @@ async fn main(spawner: embassy_executor::Spawner) {
         AppProps {
             cmd: channel.sender(),
             scoreboard,
+            flash,
+            watchdog,
         }
         .build_app()
     );
@@ -1042,8 +1070,9 @@ async fn main(spawner: embassy_executor::Spawner) {
         picoserve::Config::new(picoserve::Timeouts {
             start_read_request: Duration::from_secs(2),
             persistent_start_read_request: Duration::from_secs(1),
-            read_request: Duration::from_secs(1),
-            write: Duration::from_secs(1),
+            // OTA uploads stream ~512 KiB over the AP; keep reads alive between flash sectors.
+            read_request: Duration::from_secs(30),
+            write: Duration::from_secs(5),
         })
         .close_connection_after_response()
     );
@@ -1053,6 +1082,12 @@ async fn main(spawner: embassy_executor::Spawner) {
     }
 
     loop {
-        Timer::after_secs(60).await;
+        Timer::after_millis(200).await;
+        if ota::reset_pending() {
+            // Let the HTTP OK response flush before soft-reset into embassy-boot.
+            Timer::after_millis(500).await;
+            log::info!("OTA soft reset");
+            cortex_m::peripheral::SCB::sys_reset();
+        }
     }
 }

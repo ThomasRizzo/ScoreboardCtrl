@@ -4,11 +4,13 @@ version = 4
 
 [[package]]
 name = "ScoreboardCtrl"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
+ "cortex-m",
  "cortex-m-rt",
  "cyw43",
  "cyw43-pio",
+ "embassy-boot-rp",
  "embassy-executor",
  "embassy-futures",
  "embassy-net",
@@ -16,6 +18,7 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embassy-usb-logger",
+ "embedded-storage",
  "git-testament",
  "log",
  "panic-persist",
@@ -413,6 +416,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
+name = "embassy-boot"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73bfc955c9238df2ce9fecc6f18a64b13ecaa41a3cd42d940a09f304765d10db"
+dependencies = [
+ "digest",
+ "document-features",
+ "embassy-embedded-hal",
+ "embassy-sync",
+ "embedded-storage",
+ "embedded-storage-async",
+ "log",
+ "signature",
+]
+
+[[package]]
+name = "embassy-boot-rp"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fc17df4cf2a8ba86e8559a6515104e31ca7aa6b36221199310e244157935204"
+dependencies = [
+ "cfg-if",
+ "cortex-m",
+ "cortex-m-rt",
+ "embassy-boot",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embedded-storage",
+ "embedded-storage-async",
+ "log",
+]
+
+[[package]]
 name = "embassy-embedded-hal"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -549,6 +586,7 @@ dependencies = [
  "embedded-storage",
  "embedded-storage-async",
  "fixed",
+ "log",
  "nb 1.1.0",
  "pio",
  "rand_core 0.6.4",
@@ -1527,6 +1565,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "scoreboard-bootloader"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "embassy-boot-rp",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embedded-storage",
+]
+
+[[package]]
 name = "semver"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1618,6 +1669,12 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signature"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 
 [[package]]
 name = "siphasher"

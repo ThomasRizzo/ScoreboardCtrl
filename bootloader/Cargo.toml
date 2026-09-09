@@ -1,0 +1,16 @@
+[package]
+name = "scoreboard-bootloader"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "embassy-boot bootloader for ScoreboardCtrl (Pico W / RP2040)"
+
+[dependencies]
+embassy-rp = { version = "0.10.0", features = ["rp2040", "time-driver", "critical-section-impl"] }
+embassy-boot-rp = { version = "0.10.0", default-features = true }
+embassy-sync = "0.8.0"
+embassy-time = "0.5.1"
+cortex-m = { version = "0.7.6", features = ["inline-asm"] }
+cortex-m-rt = "0.7"
+embedded-storage = "0.3.1"
+
