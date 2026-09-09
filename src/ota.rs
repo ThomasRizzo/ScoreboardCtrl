@@ -65,6 +65,7 @@ pub fn mark_booted(flash: SharedFlash) {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct OtaService {
     pub flash: SharedFlash,
     pub watchdog: SharedWatchdog,
