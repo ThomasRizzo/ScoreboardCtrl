@@ -2,9 +2,11 @@
 #
 # Embassy + picoserve AP on 192.168.0.1.
 # Dev: Pico Debug Probe (CMSIS-DAP) + probe-rs + defmt RTT.
-#   just program         standalone (no embassy-boot): build, flash, defmt
+# Recipes default to a wired SK2229R (no simulate). Add -sim for the software clock.
+#   just program         standalone hardware: build, flash, defmt
 #   just program-ota     bootloader + ACTIVE app, reset through embassy-boot, defmt
-#   just ota             POST ACTIVE .bin (needs program-ota image + AP up)
+#   just ota             POST hardware ACTIVE .bin (needs program-ota image + AP up)
+#   just program-sim / just ota-sim / just flash-sim   software scoreboard
 #
 #   just setup           first time on a machine
 #   just test            compile-check + clippy
@@ -59,38 +61,46 @@ doctor:
     @if command -v probe-rs >/dev/null; then probe-rs list || true; fi
     @echo "serial:    {{ serial }} $(if [ -e {{ serial }} ]; then echo present; else echo 'not present'; fi)"
     @echo "ota url:   {{ ota_url }}"
-    @echo "workspace: standalone default; just program-ota / --features ota for embassy-boot"
+    @echo "workspace: just recipes are hardware (no simulate); add -sim. just program-ota / --features ota for embassy-boot"
 
-# Type-check firmware (simulate, default)
+# Type-check hardware firmware (UART + GPIO, no sim clock)
 check:
-    cargo check
-
-# Type-check hardware build (UART + GPIO, no sim clock)
-check-hw:
     cargo check --no-default-features
+
+# Type-check simulator build (software clock + scores)
+check-sim:
+    cargo check
 
 # Type-check embassy-boot bootloader
 check-bootloader:
     cargo check -p scoreboard-bootloader --release
 
-# Type-check ACTIVE (embassy-boot) app image
+# Type-check ACTIVE (embassy-boot) hardware image
 check-ota:
+    cargo check --no-default-features --features ota
+
+# Type-check ACTIVE simulator image
+check-ota-sim:
     cargo check --features ota
 
-# Debug ELF with scoreboard simulator (default)
+# Debug ELF, wired scoreboard
 build:
+    cargo build --no-default-features
+
+# Debug ELF with software clock (Pico not wired to SK2229R)
+build-sim:
     cargo build
 
-# Optimized firmware with simulator (Pico not wired to SK2229R)
+# Optimized firmware for a wired scoreboard
 release:
-    cargo build --release
-
-# Optimized firmware for a wired scoreboard (no simulate)
-release-hw:
     cargo build --release --no-default-features
 
-# Compile-check + clippy for sim and hardware cfgs, plus host unit tests
-test: check clippy check-hw clippy-hw check-bootloader check-ota clippy-ota test-host
+# Optimized firmware with simulator
+release-sim:
+    cargo build --release
+
+# Compile-check + clippy for hardware and sim cfgs, plus host unit tests
+test: check clippy check-sim clippy-sim check-bootloader check-ota clippy-ota check-ota-sim clippy-ota-sim test-host
 
 # Format Rust sources with rustfmt
 fmt:
@@ -100,16 +110,20 @@ fmt:
 fmt-check:
     cargo fmt -- --check
 
-# Lint firmware with clippy
+# Lint hardware firmware with clippy
 clippy:
-    cargo clippy -- -W clippy::all
-
-# Lint hardware (no simulate) build
-clippy-hw:
     cargo clippy --no-default-features -- -W clippy::all
 
-# Lint embassy-boot ACTIVE image
+# Lint simulator build
+clippy-sim:
+    cargo clippy -- -W clippy::all
+
+# Lint embassy-boot ACTIVE hardware image
 clippy-ota:
+    cargo clippy --no-default-features --features ota -- -W clippy::all
+
+# Lint embassy-boot ACTIVE simulator image
+clippy-ota-sim:
     cargo clippy --features ota -- -W clippy::all
 
 # Host tests for decode + DHCP/DNS helpers
@@ -161,21 +175,21 @@ enter-bootloader SERIAL=serial:
     ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true
     exit 1
 
-# ENTERBOOTLOADER over USB CDC, then copy the release UF2 (simulator).
+# ENTERBOOTLOADER over USB CDC, then copy the hardware UF2.
 reflash: release
     just enter-bootloader
     elf2uf2-rs -d {{ elf_release }}
 
-# ENTERBOOTLOADER over USB CDC, then copy the hardware UF2.
-reflash-hw: release-hw
+# ENTERBOOTLOADER over USB CDC, then copy the simulator UF2.
+reflash-sim: release-sim
     just enter-bootloader
     elf2uf2-rs -d {{ elf_release }}
 
-# Flash simulator firmware (same as reflash; hold BOOTSEL if CDC is down).
+# Flash hardware firmware (UART 38400 + GPIO pulses, no sim clock).
 flash: reflash
 
-# Flash hardware firmware (UART 38400 + GPIO pulses, no sim clock).
-flash-hw: reflash-hw
+# Flash simulator firmware (same as reflash-sim; hold BOOTSEL if CDC is down).
+flash-sim: reflash-sim
 
 # Alias for flash
 deploy: flash
@@ -199,29 +213,29 @@ flash-copy: uf2
     cp {{ uf2_release }} "$dest/"
     echo "copied {{ uf2_release }} -> $dest"
 
-# Build release (simulate), flash via Pico Debug Probe, follow defmt RTT until Ctrl-C
+# Build hardware release, flash via Pico Debug Probe, follow defmt RTT until Ctrl-C
 program:
-    #!/usr/bin/env bash
-    export PATH="${HOME}/.cargo/bin:${PATH}"
-    export DEFMT_LOG="${DEFMT_LOG:-info}"
-    cargo build --release
-    probe-rs run --chip {{ chip }} --probe {{ probe }} {{ elf_release }}
-
-# Same as program, hardware UART/GPIO image (no simulate)
-program-hw:
     #!/usr/bin/env bash
     export PATH="${HOME}/.cargo/bin:${PATH}"
     export DEFMT_LOG="${DEFMT_LOG:-info}"
     cargo build --release --no-default-features
     probe-rs run --chip {{ chip }} --probe {{ probe }} {{ elf_release }}
 
-# embassy-boot: erase, flash bootloader + ACTIVE app, reset through the BL, follow app defmt
+# Same as program, software clock (no SK2229R)
+program-sim:
+    #!/usr/bin/env bash
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    export DEFMT_LOG="${DEFMT_LOG:-info}"
+    cargo build --release
+    probe-rs run --chip {{ chip }} --probe {{ probe }} {{ elf_release }}
+
+# embassy-boot: erase, flash bootloader + hardware ACTIVE app, reset through the BL, follow app defmt
 program-ota:
     #!/usr/bin/env bash
     export PATH="${HOME}/.cargo/bin:${PATH}"
     export DEFMT_LOG="${DEFMT_LOG:-info}"
     cargo build -p scoreboard-bootloader --release
-    cargo build --release --features ota
+    cargo build --release --no-default-features --features ota
     echo "chip-erase + bootloader (clears STATE so leftover SWAP_MAGIC cannot clobber ACTIVE)"
     probe-rs download --chip {{ chip }} --probe {{ probe }} --chip-erase {{ bootloader_elf }}
     echo "ACTIVE app @ 0x10009000"
@@ -232,13 +246,13 @@ program-ota:
     echo "attaching app defmt RTT (Ctrl-C detaches; firmware keeps running)"
     probe-rs attach --chip {{ chip }} --probe {{ probe }} --no-catch-reset --no-catch-hardfault {{ elf_release }}
 
-# Same as program-ota, hardware UART/GPIO ACTIVE image
-program-ota-hw:
+# Same as program-ota, simulator ACTIVE image
+program-ota-sim:
     #!/usr/bin/env bash
     export PATH="${HOME}/.cargo/bin:${PATH}"
     export DEFMT_LOG="${DEFMT_LOG:-info}"
     cargo build -p scoreboard-bootloader --release
-    cargo build --release --no-default-features --features ota
+    cargo build --release --features ota
     probe-rs download --chip {{ chip }} --probe {{ probe }} --chip-erase {{ bootloader_elf }}
     probe-rs download --chip {{ chip }} --probe {{ probe }} {{ elf_release }}
     probe-rs reset --chip {{ chip }} --probe {{ probe }}
@@ -325,16 +339,28 @@ flash-bringup: uf2-bootloader uf2
     just _copy-uf2 {{ bringup_uf2 }}
     @echo "Pico should leave BOOTSEL and boot the app. Watch: just logs"
 
-# Optimized ACTIVE firmware (embassy-boot, simulate)
+# Optimized ACTIVE firmware (embassy-boot, wired scoreboard)
 release-ota:
-    cargo build --release --features ota
-
-# Optimized ACTIVE firmware for a wired scoreboard
-release-ota-hw:
     cargo build --release --no-default-features --features ota
 
-# Raw ACTIVE-partition image for HTTP OTA (objcopy binary; must be --features ota)
+# Optimized ACTIVE firmware with simulator
+release-ota-sim:
+    cargo build --release --features ota
+
+# Raw ACTIVE-partition image for HTTP OTA (hardware; must be --features ota)
 ota-artifact: release-ota
+    #!/usr/bin/env bash
+    sysroot="$(rustc --print sysroot)"
+    objcopy="$(find "$sysroot" -name llvm-objcopy | head -1)"
+    if [[ -z "$objcopy" || ! -x "$objcopy" ]]; then
+      echo "llvm-objcopy not found; run: rustup component add llvm-tools-preview"
+      exit 1
+    fi
+    "$objcopy" -O binary {{ elf_release }} {{ ota_bin }}
+    ls -lh {{ ota_bin }}
+
+# Simulator ACTIVE .bin (same path as ota-artifact; overwrites)
+ota-artifact-sim: release-ota-sim
     #!/usr/bin/env bash
     sysroot="$(rustc --print sysroot)"
     objcopy="$(find "$sysroot" -name llvm-objcopy | head -1)"
@@ -447,22 +473,12 @@ _ota-post BIN=ota_bin:
     # Give the AP a moment to drop before we hop home (optional)
     sleep 1
 
-# POST simulate image: build, WiFi hop to Scoreboard, upload, restore WiFi
+# POST hardware ACTIVE image: build, WiFi hop to Scoreboard, upload, restore WiFi
 ota: ota-artifact
     just _ota-post {{ ota_bin }}
 
-# POST hardware ACTIVE image: same WiFi hop behavior as ota
-ota-hw: release-ota-hw
-    #!/usr/bin/env bash
-    set -euo pipefail
-    sysroot="$(rustc --print sysroot)"
-    objcopy="$(find "$sysroot" -name llvm-objcopy | head -1)"
-    if [[ -z "$objcopy" || ! -x "$objcopy" ]]; then
-      echo "llvm-objcopy not found; run: rustup component add llvm-tools-preview"
-      exit 1
-    fi
-    "$objcopy" -O binary {{ elf_release }} {{ ota_bin }}
-    ls -lh {{ ota_bin }}
+# POST simulator ACTIVE image: same WiFi hop behavior as ota
+ota-sim: ota-artifact-sim
     just _ota-post {{ ota_bin }}
 
 # Flash / RAM section sizes of the release ELF
@@ -517,8 +533,8 @@ logs SERIAL=serial:
     fi
     just _serial_follow "$port"
 
-# fmt-check + clippy + host tests + release build (no hardware)
-ci: fmt-check clippy clippy-hw test-host release
+# fmt-check + clippy (hw + sim) + host tests + hardware release
+ci: fmt-check clippy clippy-sim test-host release
 
 # Build and open rustdoc, including private items
 doc:

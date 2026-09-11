@@ -12,8 +12,8 @@ Default period clock is **7:30** (polo).
 
 | Build | What it does |
 |---|---|
-| **simulate** (default) | Software timer and scores, onboard LED. Use when the SK2229R is not wired. |
-| **hardware** (`--no-default-features`) | 50 ms pulses on GP0–GP5 through a CD74HCT4066, time from UART0/GP17 at 38400. |
+| **hardware** (`just` default, `--no-default-features`) | 50 ms pulses on GP0–GP5 through a CD74HCT4066, time from UART0/GP17 at 38400. |
+| **simulate** (`just …-sim`, cargo feature `simulate`) | Software timer and scores, onboard LED. Use when the SK2229R is not wired. |
 
 Do not use GP0 as a blinky: that pin is the start/stop pulse.
 
@@ -65,12 +65,13 @@ Nightly Rust and `thumbv6m-none-eabi` (`rust-toolchain.toml`). Default firmware 
 
 ```bash
 just setup              # toolchain, RP2040 target, elf2uf2-rs, probe-rs
-just test               # check + clippy (sim/hw/ota) + bootloader + host tests
-just program            # standalone: build + probe-rs flash + defmt RTT
-just program-ota        # bootloader + ACTIVE app, boot through embassy-boot, defmt
+just test               # check + clippy (hw/sim/ota) + bootloader + host tests
+just program            # standalone hardware: probe-rs flash + defmt RTT
+just program-ota        # bootloader + hardware ACTIVE, boot through embassy-boot, defmt
 just attach-ota         # re-attach defmt (no flash)
-just ota                # HTTP POST ACTIVE .bin (AP must be up)
-just flash              # simulate standalone app via ENTERBOOTLOADER + UF2
+just ota                # HTTP POST hardware ACTIVE .bin (AP must be up)
+just flash              # hardware standalone UF2 via ENTERBOOTLOADER
+just program-sim        # software clock (no SK2229R)
 just --list
 ```
 
@@ -119,8 +120,8 @@ On a WiFi-only Linux host with NetworkManager (`nmcli`), `just ota` will:
 5. Switch back to the previous WiFi (even if the upload fails)
 
 ```bash
-just ota                 # simulate image + WiFi hop
-just ota-hw              # hardware image + WiFi hop
+just ota                 # hardware image + WiFi hop
+just ota-sim             # simulator image + WiFi hop
 OTA_SKIP_WIFI=1 just ota # already on Scoreboard / skip hopping
 ```
 
