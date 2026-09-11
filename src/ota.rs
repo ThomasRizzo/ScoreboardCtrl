@@ -35,9 +35,10 @@ use portable_atomic::{AtomicBool, Ordering};
 use crate::ap_log;
 
 pub const FLASH_SIZE: usize = 2 * 1024 * 1024;
-/// ACTIVE / DFU capacity from memory.x (DFU is ACTIVE + 4K).
+/// ACTIVE partition from memory.x — max OTA payload.
 pub const ACTIVE_CAPACITY: usize = 896 * 1024;
-/// DFU must be ACTIVE + one erase page (4 KiB).
+/// DFU partition size (ACTIVE + one 4 KiB erase page of swap scratch).
+/// The extra page is not firmware capacity; do not accept uploads that large.
 pub const DFU_CAPACITY: usize = ACTIVE_CAPACITY + 4 * 1024;
 const _: () = assert!(DFU_CAPACITY == 900 * 1024);
 
@@ -107,7 +108,7 @@ impl IntoResponse for OtaReply {
                     .await
             }
             Self::PayloadTooLarge => {
-                (StatusCode::PAYLOAD_TOO_LARGE, "image too large for DFU\n")
+                (StatusCode::PAYLOAD_TOO_LARGE, "image too large for ACTIVE\n")
                     .write_to(connection, response_writer)
                     .await
             }
@@ -173,7 +174,7 @@ impl OtaService {
         if content_len == 0 {
             return Err(OtaError::BadRequest("empty body; set Content-Length\n"));
         }
-        if content_len > DFU_CAPACITY {
+        if content_len > ACTIVE_CAPACITY {
             return Err(OtaError::TooLarge);
         }
 

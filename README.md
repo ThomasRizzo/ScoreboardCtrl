@@ -89,7 +89,7 @@ OTA artifact: `target/thumbv6m-none-eabi/release/scoreboard-ctrl.bin` (`just ota
 | BOOT2 + bootloader | `0x10000000` | 32 KiB | stage2 + embassy-boot |
 | STATE | `0x10008000` | 4 KiB | swap / trial-boot state |
 | ACTIVE | `0x10009000` | 896 KiB | running app |
-| DFU | `0x100E9000` | 900 KiB | staged OTA image (ACTIVE + 4 KiB) |
+| DFU | `0x100E9000` | 900 KiB | staged OTA image (ACTIVE + 4 KiB swap scratch; max POST is 896 KiB) |
 
 Measured release ACTIVE image (simulate, with cyw43 firmware + UI) is roughly **~460 KiB**; ACTIVE leaves ~400 KiB headroom. Re-check with `just size` / `just ota-artifact` after dependency bumps.
 
