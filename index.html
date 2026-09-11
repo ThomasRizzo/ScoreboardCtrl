@@ -181,11 +181,27 @@
         }
         .status { text-align: center; color: #888; font-size: 12px; min-height: 16px; margin-top: 4px; }
         .status.err { color: #ff6a5a; }
+        .dev-bar {
+            display: flex;
+            justify-content: center;
+            margin-top: 12px;
+        }
+        .btn-dev {
+            flex: 0 0 auto;
+            min-height: 32px;
+            padding: 6px 14px;
+            font-size: 11px;
+            letter-spacing: 1px;
+            color: #666;
+            background: transparent;
+            border-color: #333;
+        }
+        .dev-panel[hidden] { display: none; }
         .led-section {
             background: #121214;
             border-radius: 10px;
             padding: 12px;
-            margin-top: 48px;
+            margin-top: 8px;
             text-align: center;
             border: 1px solid #222;
         }
@@ -265,11 +281,25 @@
 
         <div class="status" id="status"></div>
 
-        <div class="led-section">
-            <h2>Onboard LED</h2>
-            <div class="led-controls">
-                <button class="btn-led" id="btnLedOn">LED on</button>
-                <button class="btn-led" id="btnLedOff">LED off</button>
+        <div class="dev-bar">
+            <button type="button" class="btn-dev" id="btnDev" aria-expanded="false">Dev</button>
+        </div>
+        <div id="devPanel" class="dev-panel" hidden>
+            <div class="led-section">
+                <h2>Onboard LED</h2>
+                <div class="led-controls">
+                    <button class="btn-led" id="btnLedOn">LED on</button>
+                    <button class="btn-led" id="btnLedOff">LED off</button>
+                </div>
+            </div>
+            <div class="led-section">
+                <h2>Firmware OTA</h2>
+                <p class="hint" style="font-size:0.85rem;opacity:0.8;margin:0.25rem 0 0.5rem">Upload a <code>scoreboard-ctrl.bin</code> from <code>just ota-artifact</code>. Device will reboot.</p>
+                <input type="file" id="otaFile" accept=".bin,application/octet-stream" />
+                <div class="led-controls" style="margin-top:0.5rem">
+                    <button class="btn-led" id="btnOta">Upload &amp; reboot</button>
+                </div>
+                <p class="status" id="otaStatus"></p>
             </div>
         </div>
         <p class="build" id="buildInfo"></p>
@@ -433,6 +463,14 @@
         });
         bind('btnLedOn', '/led/on');
         bind('btnLedOff', '/led/off');
+        document.getElementById('btnDev').addEventListener('click', () => {
+            const panel = document.getElementById('devPanel');
+            const btn = document.getElementById('btnDev');
+            const open = panel.hasAttribute('hidden');
+            if (open) panel.removeAttribute('hidden');
+            else panel.setAttribute('hidden', '');
+            btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+        });
 
         onTap(document.getElementById('btnReset'), () => {
             const live = document.getElementById('modeBadge').dataset.sim === '0';
@@ -500,6 +538,34 @@
                 inflight = false;
             }
         }
+
+        document.getElementById('btnOta').addEventListener('click', async () => {
+            const input = document.getElementById('otaFile');
+            const status = document.getElementById('otaStatus');
+            const file = input.files && input.files[0];
+            if (!file) {
+                status.textContent = 'choose a .bin first';
+                status.className = 'status err';
+                return;
+            }
+            status.textContent = 'uploading ' + file.size + ' bytes…';
+            status.className = 'status';
+            try {
+                const res = await fetch('/api/ota', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/octet-stream' },
+                    body: file,
+                    cache: 'no-store',
+                });
+                const text = await res.text();
+                if (!res.ok) throw new Error(text || ('HTTP ' + res.status));
+                status.textContent = 'OK — device rebooting';
+                status.className = 'status';
+            } catch (e) {
+                status.textContent = String(e.message || e);
+                status.className = 'status err';
+            }
+        });
 
         setInterval(updateStatus, 500);
         updateStatus();

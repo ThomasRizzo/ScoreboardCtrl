@@ -1,0 +1,6 @@
+# Raspberry Pi Debug Probe (CMSIS-DAP) and RP2040 BOOTSEL.
+# Install: sudo cp scripts/69-probe-rs.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000c", MODE="0666", TAG+="uaccess"
+ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0666", TAG+="uaccess"
+# CMSIS-DAP (generic)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2e8a", MODE="0666", TAG+="uaccess"
