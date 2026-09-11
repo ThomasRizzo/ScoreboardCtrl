@@ -15,11 +15,13 @@ Default period clock is **7:30** (polo).
 | **hardware** (`just` default, `--no-default-features`) | 50 ms pulses on GP0–GP5 through a CD74HCT4066, time from UART0/GP17 at 38400. |
 | **simulate** (`just …-sim`, cargo feature `simulate`) | Software timer and scores, onboard LED. Use when the SK2229R is not wired. |
 
+`cargo build` still enables `simulate` unless you pass `--no-default-features`. `just` recipes pass that flag for you.
+
 Do not use GP0 as a blinky: that pin is the start/stop pulse.
 
 ## Phone UI
 
-- Compact two-column home/away scores, timer, set-clock; **Dev** reveals onboard LED and OTA
+- Compact two-column home/away scores, timer, set-clock; **Dev** reveals onboard LED and OTA file upload
 - Optimistic +/- so taps feel instant; 280 ms lockout so one tap is +1
 - iOS captive-portal sheet usually opens the UI on join
 - Android often will not pop a sign-in sheet; type `http://192.168.0.1` (include `http://`)
@@ -32,8 +34,8 @@ Do not use GP0 as a blinky: that pin is the start/stop pulse.
 | Wi-Fi stations (CYW43439 AP) | 4 |
 | DHCP pool | 192.168.0.10–.17 (8) |
 | HTTP at once | 12 TCP workers |
-| Idle TCP | dropped after 5 s |
-| Each HTTP request | `Connection: close` |
+| Idle TCP | socket timeout 60 s |
+| Each HTTP request | `Connection: close`; OTA body reads allowed 30 s |
 
 ## Hardware
 
@@ -52,10 +54,11 @@ Do not use GP0 as a blinky: that pin is the start/stop pulse.
 | GP4 | Away − |
 | GP5 | Hardware reset pulse |
 | GP17 | UART0 RX ← SK2229R TX, 38400 (hardware build, RX only) |
-| USB CDC | VSP: all logs out, `ENTERBOOTLOADER` in (`just logs`, typically `/dev/ttyACM0`) |
-| Onboard LED | CYW43 gpio 0 (not GP0) |
+| USB CDC | `--features usb-log` only: VSP logs + `ENTERBOOTLOADER` (`just logs`) |
+| SWD / Pico Debug Probe | defmt RTT (`just program`, `just attach-ota`) |
+| Onboard LED | CYW43 gpio 0 (not GP0); UI under **Dev** |
 
-SK2229R packet (6 bytes, UART 38400): `00 | min | sec | shotclock | 3F | crc`. Time bytes decode as `(0xFF - b) >> 1`. Frames are accepted only with the `3F` marker and minutes ≤ 99 / seconds ≤ 59; a `0x00` CRC or shot-clock byte does not resync the parser. Hardware builds dump every UART0 byte as hex on USB CDC (`just logs`) so unused fields (shot clock, CRC) and any other traffic are visible. Hardware `running` follows the clock: time remaining decreasing means running, `00:00` or a frozen display means stopped (the board’s own start/stop button is independent of GP0). Scores are 0–99.
+SK2229R packet (6 bytes, UART 38400): `00 | min | sec | shotclock | 3F | crc`. Time bytes decode as `(0xFF - b) >> 1`. Frames are accepted only with the `3F` marker and minutes ≤ 99 / seconds ≤ 59; a `0x00` CRC or shot-clock byte does not resync the parser. Hardware builds dump every UART0 byte as hex on the log facade (defmt RTT, or USB CDC with `--features usb-log`) so unused fields (shot clock, CRC) and any other traffic are visible. Hardware `running` follows the clock: time remaining decreasing means running, `00:00` or a frozen display means stopped (the board’s own start/stop button is independent of GP0). Scores are 0–99.
 
 The AP is open (no password). Anyone on **Scoreboard** can change the clock and scores.
 
@@ -91,7 +94,7 @@ OTA artifact: `target/thumbv6m-none-eabi/release/scoreboard-ctrl.bin` (`just ota
 | ACTIVE | `0x10009000` | 896 KiB | running app |
 | DFU | `0x100E9000` | 900 KiB | staged OTA image (ACTIVE + 4 KiB swap scratch; max POST is 896 KiB) |
 
-Measured release ACTIVE image (simulate, with cyw43 firmware + UI) is roughly **~460 KiB**; ACTIVE leaves ~400 KiB headroom. Re-check with `just size` / `just ota-artifact` after dependency bumps.
+Measured release ACTIVE image (cyw43 firmware + UI) is roughly **~446 KiB**; ACTIVE leaves ~450 KiB headroom. Re-check with `just size` / `just ota-artifact` after dependency bumps. Max HTTP OTA body is **896 KiB** (`ACTIVE_CAPACITY`); larger POSTs are `413`.
 
 ### First-time OTA flash (probe-rs)
 
@@ -125,19 +128,19 @@ just ota-sim             # simulator image + WiFi hop
 OTA_SKIP_WIFI=1 just ota # already on Scoreboard / skip hopping
 ```
 
-Phone / UI: stay on **Scoreboard**, open `http://192.168.0.1/`, use the OTA file upload.
+Phone / UI: stay on **Scoreboard**, open `http://192.168.0.1/`, tap **Dev**, use the OTA file upload (`just ota-artifact`).
 
-Requires `nmcli` and `curl`. Pico must already be running (AP up). USB CDC (`just logs`) still works while the laptop is on Scoreboard.
+Requires `nmcli` and `curl`. Pico must already be running (AP up). Defmt (`just attach-ota`) still works while the laptop is on Scoreboard.
 
-Progress is logged on USB CDC. On success the device `mark_updated`s and soft-resets; embassy-boot swaps DFU→ACTIVE. The new image calls `mark_booted` only after the Scoreboard AP and HTTP workers are up; if it hangs before that, the next watchdog or power-cycle rolls back.
+Progress is logged over defmt (or USB CDC with `usb-log`). On success the device `mark_updated`s and soft-resets; embassy-boot swaps DFU→ACTIVE. The new image calls `mark_booted` only after the Scoreboard AP and HTTP workers are up; if it hangs before that, the next watchdog or power-cycle rolls back.
 
-Concurrent OTAs are rejected (`503`). Truncated uploads do **not** call `mark_updated`, so the running image stays Booted and will not swap.
+Concurrent OTAs are rejected (`503`). Truncated uploads and bodies larger than ACTIVE (896 KiB) do **not** call `mark_updated`, so the running image stays Booted and will not swap.
 
 
 ### Recovery
 
 - Soft brick / bad trial image: power-cycle; embassy-boot rolls back if `mark_booted` never ran.
-- USB BOOTSEL still works: `ENTERBOOTLOADER` on CDC or hold BOOTSEL, then reflash bootloader and/or app UF2s.
+- USB BOOTSEL still works: hold BOOTSEL (or `ENTERBOOTLOADER` on CDC if built with `usb-log`), then reflash bootloader and/or app UF2s. Default probe-rs images have no CDC command.
 - Do not flash a pre-embassy-boot UF2 without restoring the bootloader first — a whole-flash image can overwrite the boot partitions.
 
 ## HTTP API
@@ -155,6 +158,7 @@ POST /api/ctrl/away-inc
 POST /api/ctrl/away-dec
 POST /api/ctrl/scores-zero
 POST /api/timer/set/{min}/{sec}   (simulate only; hardware Reset pulses GP5)
+POST /api/ota                     (--features ota) raw ACTIVE .bin, max 896 KiB
 POST /led/on
 POST /led/off
 ```
@@ -164,20 +168,23 @@ Unknown GETs (captive-portal probes such as `/generate_204`) 302 to `http://192.
 `GET /api/status` example:
 
 ```json
-{"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":true,"ver":"0.2.1","git":"abc1234","date":"2026-09-05"}
+{"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":false,"ver":"0.4.1","git":"abc1234","date":"2026-09-10"}
 ```
 
 ## Layout
 
-- `src/main.rs` — Embassy tasks, GPIO/LED, HTTP routes, USB BOOTSEL helper
+- `src/main.rs` — Embassy tasks, GPIO/LED, HTTP routes
 - `src/ota.rs` — embassy-boot `mark_booted` + `POST /api/ota`
+- `src/defmt_log.rs` — `log` facade → defmt RTT (default; not used with `usb-log`)
 - `bootloader/` — embassy-boot-rp bootloader workspace member
-- `memory-app.x` — app flash map (copied to linker via `build.rs`; kept out of repo root name `memory.x` so it cannot shadow `bootloader/memory.x`)
+- `memory-app.x` — OTA ACTIVE flash map (copied via `build.rs` when `--features ota`)
+- `memory-standalone.x` — whole-flash map for `just program` (no bootloader)
 - `src/net_services.rs` — DHCP, DNS hijack, mDNS (`scoreboard.local` / `sb.local`)
-- `src/ap_log.rs` — AP/captive trace on USB CDC (VSP)
+- `src/ap_log.rs` — AP/captive trace via `log`
 - `src/lib.rs` / `src/decode.rs` / `src/net_proto.rs` — host-tested clock decode and DHCP/DNS helpers
 - `index.html` — phone UI (compiled into the firmware)
-- `justfile` — setup, flash, logs
+- `justfile` — setup, flash, OTA, probe-rs
+- `scripts/` — probe udev rules, UF2 merge
 - `cyw43-firmware/` — CYW43439 firmware + Pico W NVRAM
 
 ## Network
