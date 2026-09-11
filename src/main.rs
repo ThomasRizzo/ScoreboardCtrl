@@ -4,39 +4,51 @@
 
 #[cfg_attr(feature = "simulate", allow(dead_code))]
 mod ap_log;
+mod defmt_log;
 mod net_services;
+#[cfg(feature = "ota")]
 mod ota;
 
-use core::cell::{Cell, RefCell};
+use defmt_rtt as _;
+use panic_probe as _;
+
+#[cfg(feature = "usb-log")]
+use core::cell::Cell;
+#[cfg(feature = "ota")]
+use core::cell::RefCell;
 use cyw43::Control;
 use cyw43_pio::PioSpi;
+#[cfg(feature = "ota")]
+use embassy_rp::flash::{Blocking, Flash};
 use embassy_rp::{
     clocks::RoscRng,
     dma,
-    flash::{Blocking, Flash},
     gpio::{Level, Output},
     peripherals::PIO0,
     pio::Pio,
     watchdog::Watchdog,
 };
+#[cfg(feature = "ota")]
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+#[cfg(any(feature = "ota", feature = "usb-log"))]
+use embassy_sync::blocking_mutex::Mutex as BlockingMutex;
 use embassy_sync::{
-    blocking_mutex::{
-        raw::{CriticalSectionRawMutex, NoopRawMutex},
-        Mutex as BlockingMutex,
-    },
+    blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, Receiver, Sender},
     mutex::Mutex,
 };
 use embassy_time::{Duration, Instant, Timer};
+#[cfg(feature = "usb-log")]
 use embassy_usb_logger::ReceiverHandler;
 use git_testament::git_testament_macros;
-use panic_persist as _;
+#[cfg(feature = "ota")]
+use picoserve::routing::post_service;
 use picoserve::{
     io::Read,
     make_static,
     request::{Path, Request},
     response::{IntoResponse, Json, ResponseWriter, StatusCode},
-    routing::{get, get_service, parse_path_segment, post, post_service, PathRouterService},
+    routing::{get, get_service, parse_path_segment, post, PathRouterService},
     AppBuilder, AppRouter, ResponseSent,
 };
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
@@ -56,9 +68,18 @@ const GIT_SHORT: &str = if GIT_HASH.len() >= 7 {
     GIT_HASH
 };
 
+#[cfg(feature = "usb-log")]
 embassy_rp::bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
+    UART0_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART0>;
+    DMA_IRQ_0 => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
+        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>;
+});
+
+#[cfg(not(feature = "usb-log"))]
+embassy_rp::bind_interrupts!(struct Irqs {
+    PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
     UART0_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART0>;
     DMA_IRQ_0 => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
         dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>;
@@ -140,10 +161,14 @@ impl Default for ScoreboardState {
 #[derive(Clone, Copy)]
 struct SharedScoreboard(&'static Mutex<Cs, ScoreboardState>);
 
+type SharedWatchdog = &'static Mutex<Cs, Watchdog>;
+
 struct AppProps {
     cmd: Sender<'static, Cs, Command, 8>,
     scoreboard: SharedScoreboard,
+    #[cfg(feature = "ota")]
     flash: ota::SharedFlash,
+    #[cfg(feature = "ota")]
     watchdog: ota::SharedWatchdog,
 }
 
@@ -312,9 +337,11 @@ impl AppBuilder for AppProps {
     fn build_app(self) -> picoserve::Router<Self::PathRouter> {
         let cmd = self.cmd;
         let scoreboard = self.scoreboard;
+        #[cfg(feature = "ota")]
         let flash = self.flash;
+        #[cfg(feature = "ota")]
         let watchdog = self.watchdog;
-        picoserve::Router::from_service(PortalFallback)
+        let router = picoserve::Router::from_service(PortalFallback)
             .route("/", ui_page())
             .route("/index.html", ui_page())
             .route("/hotspot-detect.html", apple_probe())
@@ -424,14 +451,18 @@ impl AppBuilder for AppProps {
                         date: GIT_DATE,
                     })
                 }),
-            )
-            .route(
+            );
+        #[cfg(feature = "ota")]
+        {
+            router.route(
                 "/api/ota",
-                post_service(ota::OtaService {
-                    flash,
-                    watchdog,
-                }),
+                post_service(ota::OtaService { flash, watchdog }),
             )
+        }
+        #[cfg(not(feature = "ota"))]
+        {
+            router
+        }
     }
 }
 
@@ -828,8 +859,10 @@ async fn read_serial(
 }
 
 /// USB CDC is read/write: logs out, `ENTERBOOTLOADER` in (reboots to UF2 BOOTSEL).
+#[cfg(feature = "usb-log")]
 struct BootCmd;
 
+#[cfg(feature = "usb-log")]
 impl embassy_usb_logger::ReceiverHandler for BootCmd {
     fn new() -> Self {
         Self
@@ -864,13 +897,14 @@ impl embassy_usb_logger::ReceiverHandler for BootCmd {
 }
 
 #[embassy_executor::task]
-async fn watchdog_task(wdg: ota::SharedWatchdog) -> ! {
+async fn watchdog_task(wdg: SharedWatchdog) -> ! {
     loop {
         wdg.lock().await.feed(Duration::from_secs(8));
         Timer::after_secs(1).await;
     }
 }
 
+#[cfg(feature = "usb-log")]
 #[embassy_executor::task]
 async fn logger_task(usb: embassy_rp::Peri<'static, embassy_rp::peripherals::USB>) {
     let driver = embassy_rp::usb::Driver::new(usb, Irqs);
@@ -935,22 +969,30 @@ async fn web_task(
 async fn main(spawner: embassy_executor::Spawner) {
     let p = embassy_rp::init(Default::default());
 
-    // USB logging must start before cyw43 init so a hang/panic is still visible.
-    let flash = make_static!(
+    #[cfg(not(feature = "usb-log"))]
+    defmt_log::init();
+    defmt::info!("defmt rtt ok");
+    log::info!("log facade -> defmt");
+
+    let mut wdg = Watchdog::new(p.WATCHDOG);
+    // Override leftover bootloader WD (embassy example does this too).
+    wdg.pause_on_debug(true);
+    wdg.start(Duration::from_secs(8));
+    let watchdog = make_static!(Mutex<Cs, Watchdog>, Mutex::new(wdg));
+    spawner.spawn(watchdog_task(watchdog).unwrap());
+    #[cfg(feature = "usb-log")]
+    {
+        spawner.spawn(logger_task(p.USB).unwrap());
+        Timer::after_millis(200).await;
+    }
+
+    #[cfg(feature = "ota")]
+    let flash: ota::SharedFlash = make_static!(
         BlockingMutex<NoopRawMutex, RefCell<Flash<'static, embassy_rp::peripherals::FLASH, Blocking, { ota::FLASH_SIZE }>>>,
         BlockingMutex::new(RefCell::new(Flash::<_, Blocking, { ota::FLASH_SIZE }>::new_blocking(
             p.FLASH,
         )))
     );
-    // Confirm successful boot to embassy-boot (stops rollback of a trial image).
-    ota::mark_booted(flash);
-
-    let mut wdg = Watchdog::new(p.WATCHDOG);
-    wdg.start(Duration::from_secs(8));
-    let watchdog = make_static!(Mutex<Cs, Watchdog>, Mutex::new(wdg));
-    spawner.spawn(watchdog_task(watchdog).unwrap());
-    spawner.spawn(logger_task(p.USB).unwrap());
-    Timer::after_millis(200).await;
     ap_log::emit(format_args!(
         "boot v{} {} {} sim={} portal={}",
         VERSION,
@@ -959,12 +1001,6 @@ async fn main(spawner: embassy_executor::Spawner) {
         cfg!(feature = "simulate"),
         PORTAL_URL
     ));
-
-    if let Some(panic_message) = panic_persist::get_panic_message_utf8() {
-        // Reading clears the dump so the next boot is not stuck. Keep serving.
-        log::error!("last panic: {panic_message}");
-        ap_log::emit(format_args!("last panic: {panic_message}"));
-    }
 
     let fw = cyw43::aligned_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
@@ -1059,7 +1095,9 @@ async fn main(spawner: embassy_executor::Spawner) {
         AppProps {
             cmd: channel.sender(),
             scoreboard,
+            #[cfg(feature = "ota")]
             flash,
+            #[cfg(feature = "ota")]
             watchdog,
         }
         .build_app()
@@ -1081,8 +1119,18 @@ async fn main(spawner: embassy_executor::Spawner) {
         spawner.spawn(web_task(task_id, stack, app, config).unwrap());
     }
 
+    // Trial boot: commit only after AP + HTTP workers are up. A hang before this
+    // leaves SWAP_MAGIC so the next watchdog/power-cycle reverts to the old image.
+    // Do not wait for a client — a good box with nobody joined would roll back.
+    #[cfg(feature = "ota")]
+    {
+        Timer::after_millis(10).await;
+        ota::mark_booted(flash);
+    }
+
     loop {
         Timer::after_millis(200).await;
+        #[cfg(feature = "ota")]
         if ota::reset_pending() {
             // Let the HTTP OK response flush before soft-reset into embassy-boot.
             Timer::after_millis(500).await;

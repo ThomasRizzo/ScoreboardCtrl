@@ -1,15 +1,14 @@
 # ScoreboardCtrl — Raspberry Pi Pico W firmware
 #
-# Embassy + picoserve AP on 192.168.0.1 with embassy-boot OTA.
-# First-time: flash bootloader UF2, then app UF2 (USB BOOTSEL).
-# Later updates: just ota (nmcli hops to Scoreboard AP, POSTs, hops back).
+# Embassy + picoserve AP on 192.168.0.1.
+# Dev: Pico Debug Probe (CMSIS-DAP) + probe-rs + defmt RTT.
+#   just program         standalone (no embassy-boot): build, flash, defmt
+#   just program-ota     bootloader + ACTIVE app, reset through embassy-boot, defmt
+#   just ota             POST ACTIVE .bin (needs program-ota image + AP up)
 #
 #   just setup           first time on a machine
 #   just test            compile-check + clippy
-#   just flash-bootloader
-#   just flash           ENTERBOOTLOADER + app UF2 (or hold BOOTSEL)
-#   just ota             build + WiFi hop + HTTP OTA + restore WiFi
-#   OTA_SKIP_WIFI=1 just ota   # skip hopping if already on Scoreboard
+#   just flash           ENTERBOOTLOADER + standalone UF2 (or hold BOOTSEL)
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 set dotenv-load := false
@@ -24,20 +23,29 @@ bootloader_uf2 := bootloader_elf + ".uf2"
 ota_bin := elf_release + ".bin"
 serial := "/dev/ttyACM0"
 ota_url := "http://192.168.0.1/api/ota"
+probe := "2e8a:000c"
+chip := "RP2040"
 
 # List available recipes
 default:
     @just --list
 
-# Install nightly toolchain, RP2040 target, and UF2 flasher
+# Install nightly toolchain, RP2040 target, UF2 flasher, and probe-rs
 setup:
     rustup show
     rustup target add {{ target }}
     rustup component add rust-src rustfmt clippy llvm-tools-preview
     command -v elf2uf2-rs >/dev/null || cargo install elf2uf2-rs
-    @echo "optional: cargo install probe-rs-tools   # SWD debug probe"
-    @echo "optional: picotool from Raspberry Pi     # load/reboot without BOOTSEL"
+    command -v probe-rs >/dev/null || cargo install probe-rs-tools --locked
+    @echo "udev for Pico Debug Probe: just probe-udev"
     just doctor
+
+# Allow the current user to use the Pico Debug Probe (needs sudo)
+probe-udev:
+    sudo cp scripts/69-probe-rs.rules /etc/udev/rules.d/69-probe-rs.rules
+    sudo udevadm control --reload-rules
+    sudo udevadm trigger
+    @echo "unplug/replug the Debug Probe if probe-rs list still says inaccessible"
 
 # Report toolchain, target, and flash tools
 doctor:
@@ -46,11 +54,12 @@ doctor:
     @echo "host:      $(rustc -vV | awk '/^host:/{print $2}')"
     @rustup target list --installed | grep -F {{ target }} || { echo "missing target {{ target }}"; exit 1; }
     @command -v elf2uf2-rs >/dev/null && echo "elf2uf2:   $(command -v elf2uf2-rs)" || echo "elf2uf2:   NOT INSTALLED (just setup)"
-    @command -v probe-rs >/dev/null && echo "probe-rs:  $(command -v probe-rs)" || echo "probe-rs:  (optional)"
+    @command -v probe-rs >/dev/null && echo "probe-rs:  $(command -v probe-rs)" || echo "probe-rs:  NOT INSTALLED (just setup)"
     @command -v picotool >/dev/null && echo "picotool:  $(command -v picotool)" || echo "picotool:  (optional)"
+    @if command -v probe-rs >/dev/null; then probe-rs list || true; fi
     @echo "serial:    {{ serial }} $(if [ -e {{ serial }} ]; then echo present; else echo 'not present'; fi)"
     @echo "ota url:   {{ ota_url }}"
-    @echo "workspace: bootloader + scoreboard-ctrl (embassy-boot A/B)"
+    @echo "workspace: standalone default; just program-ota / --features ota for embassy-boot"
 
 # Type-check firmware (simulate, default)
 check:
@@ -63,6 +72,10 @@ check-hw:
 # Type-check embassy-boot bootloader
 check-bootloader:
     cargo check -p scoreboard-bootloader --release
+
+# Type-check ACTIVE (embassy-boot) app image
+check-ota:
+    cargo check --features ota
 
 # Debug ELF with scoreboard simulator (default)
 build:
@@ -77,7 +90,7 @@ release-hw:
     cargo build --release --no-default-features
 
 # Compile-check + clippy for sim and hardware cfgs, plus host unit tests
-test: check clippy check-hw clippy-hw check-bootloader test-host
+test: check clippy check-hw clippy-hw check-bootloader check-ota clippy-ota test-host
 
 # Format Rust sources with rustfmt
 fmt:
@@ -94,6 +107,10 @@ clippy:
 # Lint hardware (no simulate) build
 clippy-hw:
     cargo clippy --no-default-features -- -W clippy::all
+
+# Lint embassy-boot ACTIVE image
+clippy-ota:
+    cargo clippy --features ota -- -W clippy::all
 
 # Host tests for decode + DHCP/DNS helpers
 test-host:
@@ -182,9 +199,70 @@ flash-copy: uf2
     cp {{ uf2_release }} "$dest/"
     echo "copied {{ uf2_release }} -> $dest"
 
-# Flash with a debug probe (CMSIS-DAP / Picoprobe), if probe-rs is installed
-flash-probe: release
-    probe-rs run --chip RP2040 {{ elf_release }}
+# Build release (simulate), flash via Pico Debug Probe, follow defmt RTT until Ctrl-C
+program:
+    #!/usr/bin/env bash
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    export DEFMT_LOG="${DEFMT_LOG:-info}"
+    cargo build --release
+    probe-rs run --chip {{ chip }} --probe {{ probe }} {{ elf_release }}
+
+# Same as program, hardware UART/GPIO image (no simulate)
+program-hw:
+    #!/usr/bin/env bash
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    export DEFMT_LOG="${DEFMT_LOG:-info}"
+    cargo build --release --no-default-features
+    probe-rs run --chip {{ chip }} --probe {{ probe }} {{ elf_release }}
+
+# embassy-boot: erase, flash bootloader + ACTIVE app, reset through the BL, follow app defmt
+program-ota:
+    #!/usr/bin/env bash
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    export DEFMT_LOG="${DEFMT_LOG:-info}"
+    cargo build -p scoreboard-bootloader --release
+    cargo build --release --features ota
+    echo "chip-erase + bootloader (clears STATE so leftover SWAP_MAGIC cannot clobber ACTIVE)"
+    probe-rs download --chip {{ chip }} --probe {{ probe }} --chip-erase {{ bootloader_elf }}
+    echo "ACTIVE app @ 0x10009000"
+    probe-rs download --chip {{ chip }} --probe {{ probe }} {{ elf_release }}
+    probe-rs reset --chip {{ chip }} --probe {{ probe }}
+    # Bootloader has its own RTT block; wait for the app to jump and init defmt.
+    sleep 2
+    echo "attaching app defmt RTT (Ctrl-C detaches; firmware keeps running)"
+    probe-rs attach --chip {{ chip }} --probe {{ probe }} --no-catch-reset --no-catch-hardfault {{ elf_release }}
+
+# Same as program-ota, hardware UART/GPIO ACTIVE image
+program-ota-hw:
+    #!/usr/bin/env bash
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    export DEFMT_LOG="${DEFMT_LOG:-info}"
+    cargo build -p scoreboard-bootloader --release
+    cargo build --release --no-default-features --features ota
+    probe-rs download --chip {{ chip }} --probe {{ probe }} --chip-erase {{ bootloader_elf }}
+    probe-rs download --chip {{ chip }} --probe {{ probe }} {{ elf_release }}
+    probe-rs reset --chip {{ chip }} --probe {{ probe }}
+    sleep 2
+    probe-rs attach --chip {{ chip }} --probe {{ probe }} --no-catch-reset --no-catch-hardfault {{ elf_release }}
+
+# Attach defmt to a running ACTIVE image (no flash). Use after program-ota or HTTP OTA.
+# RTT is not a history buffer — idle firmware is silent. Reset first to recapture boot:
+#   probe-rs reset --chip RP2040 --probe 2e8a:000c && just attach-ota
+attach-ota:
+    #!/usr/bin/env bash
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    export DEFMT_LOG="${DEFMT_LOG:-info}"
+    probe-rs attach --chip {{ chip }} --probe {{ probe }} --no-catch-reset --no-catch-hardfault {{ elf_release }}
+
+# Attach defmt using the bootloader ELF (debug a failed jump)
+attach-bootloader:
+    #!/usr/bin/env bash
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    export DEFMT_LOG="${DEFMT_LOG:-info}"
+    probe-rs attach --chip {{ chip }} --probe {{ probe }} --no-catch-reset --no-catch-hardfault {{ bootloader_elf }}
+
+# Flash with a debug probe and attach (alias for program)
+flash-probe: program
 
 # Flash with picotool (Pico already in BOOTSEL, or picotool can reset it)
 flash-picotool: uf2
@@ -213,11 +291,50 @@ flash-bootloader: uf2-bootloader
       exit 1
     fi
     cp {{ bootloader_uf2 }} "$dest/"
+    sync
     echo "copied {{ bootloader_uf2 }} -> $dest"
-    echo "Next: just flash   # or just flash-hw"
+    echo "Bootloader-only flash has no app/AP. Next (BOOTSEL again): just flash"
+    echo "Or one-shot: just flash-bringup"
 
-# Raw ACTIVE-partition image for HTTP OTA (objcopy binary)
-ota-artifact: release
+# Merge UF2 images into one file (single BOOTSEL copy; RP2 reboots after a complete UF2)
+_merge-uf2 A B OUT:
+    python3 scripts/merge-uf2.py "{{ A }}" "{{ B }}" "{{ OUT }}" --state-addr 0x10008000 --state-size 4096
+
+# Copy a UF2 onto the mounted RPI-RP2 volume and sync
+_copy-uf2 FILE:
+    #!/usr/bin/env bash
+    dest=""
+    for p in "/media/${USER}/RPI-RP2" "/run/media/${USER}/RPI-RP2" "/mnt/RPI-RP2"; do
+      if [[ -d "$p" ]]; then dest="$p"; break; fi
+    done
+    if [[ -z "$dest" ]]; then
+      echo "RPI-RP2 volume not mounted. Hold BOOTSEL, plug in the Pico W, then retry."
+      exit 1
+    fi
+    src="{{ FILE }}"
+    echo "copying $src -> $dest/"
+    cp "$src" "$dest/"
+    sync
+    echo "copied $(basename "$src") ($(wc -c < "$src") bytes)"
+
+bringup_uf2 := "target" / target / "release" / "scoreboard-bringup.uf2"
+
+# First-time USB flash: bootloader + app in one UF2 (one BOOTSEL)
+flash-bringup: uf2-bootloader uf2
+    just _merge-uf2 {{ bootloader_uf2 }} {{ uf2_release }} {{ bringup_uf2 }}
+    just _copy-uf2 {{ bringup_uf2 }}
+    @echo "Pico should leave BOOTSEL and boot the app. Watch: just logs"
+
+# Optimized ACTIVE firmware (embassy-boot, simulate)
+release-ota:
+    cargo build --release --features ota
+
+# Optimized ACTIVE firmware for a wired scoreboard
+release-ota-hw:
+    cargo build --release --no-default-features --features ota
+
+# Raw ACTIVE-partition image for HTTP OTA (objcopy binary; must be --features ota)
+ota-artifact: release-ota
     #!/usr/bin/env bash
     sysroot="$(rustc --print sysroot)"
     objcopy="$(find "$sysroot" -name llvm-objcopy | head -1)"
@@ -324,7 +441,9 @@ _ota-post BIN=ota_bin:
       --data-binary @"$bin" \
       "$url"
     echo
-    echo "OTA accepted; device should soft-reset into embassy-boot. Watch: just logs"
+    echo "OTA accepted; embassy-boot will swap ACTIVE (~tens of seconds) then trial-boot."
+    echo "AP returns when mark_booted succeeds. Recapture boot logs:"
+    echo "  probe-rs reset --chip RP2040 --probe 2e8a:000c && just attach-ota"
     # Give the AP a moment to drop before we hop home (optional)
     sleep 1
 
@@ -332,8 +451,8 @@ _ota-post BIN=ota_bin:
 ota: ota-artifact
     just _ota-post {{ ota_bin }}
 
-# POST hardware image: same WiFi hop behavior as ota
-ota-hw: release-hw
+# POST hardware ACTIVE image: same WiFi hop behavior as ota
+ota-hw: release-ota-hw
     #!/usr/bin/env bash
     set -euo pipefail
     sysroot="$(rustc --print sysroot)"

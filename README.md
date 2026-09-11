@@ -19,7 +19,7 @@ Do not use GP0 as a blinky: that pin is the start/stop pulse.
 
 ## Phone UI
 
-- Compact two-column home/away scores, timer, set-clock, LED below the fold
+- Compact two-column home/away scores, timer, set-clock; **Dev** reveals onboard LED and OTA
 - Optimistic +/- so taps feel instant; 280 ms lockout so one tap is +1
 - iOS captive-portal sheet usually opens the UI on join
 - Android often will not pop a sign-in sheet; type `http://192.168.0.1` (include `http://`)
@@ -61,18 +61,22 @@ The AP is open (no password). Anyone on **Scoreboard** can change the clock and 
 
 ## Build and flash
 
-Nightly Rust and `thumbv6m-none-eabi` (`rust-toolchain.toml`). The firmware uses **embassy-boot** (A/B): a small bootloader plus ACTIVE/DFU/STATE partitions. First-time bring-up is still UF2 over USB BOOTSEL (`elf2uf2-rs`); later updates can use HTTP OTA on the Scoreboard AP.
+Nightly Rust and `thumbv6m-none-eabi` (`rust-toolchain.toml`). Default firmware is a standalone image (BOOT2 at `0x10000000`). Dev flashes go through a **Pico Debug Probe** (CMSIS-DAP) with **defmt RTT**.
 
 ```bash
-just setup              # toolchain, RP2040 target, elf2uf2-rs
-just test               # check + clippy (sim/hw) + bootloader + host tests
-just flash-bootloader   # once: hold BOOTSEL, copy bootloader UF2
-just flash              # simulate app via ENTERBOOTLOADER + UF2
-just flash-hw           # hardware app
-just ota                # POST release .bin to http://192.168.0.1/api/ota
-just logs               # USB CDC (VSP)
+just setup              # toolchain, RP2040 target, elf2uf2-rs, probe-rs
+just test               # check + clippy (sim/hw/ota) + bootloader + host tests
+just program            # standalone: build + probe-rs flash + defmt RTT
+just program-ota        # bootloader + ACTIVE app, boot through embassy-boot, defmt
+just attach-ota         # re-attach defmt (no flash)
+just ota                # HTTP POST ACTIVE .bin (AP must be up)
+just flash              # simulate standalone app via ENTERBOOTLOADER + UF2
 just --list
 ```
+
+Pico Debug Probe udev (once): `sudo cp scripts/69-probe-rs.rules /etc/udev/rules.d/` then reload udev. Probe selector is `2e8a:000c`.
+
+embassy-boot HTTP OTA is `--features ota` (ACTIVE image at `0x10009000`). Use `just program-ota`, not a combined UF2, for first bring-up.
 
 Release ELF: `target/thumbv6m-none-eabi/release/scoreboard-ctrl`.  
 OTA artifact: `target/thumbv6m-none-eabi/release/scoreboard-ctrl.bin` (`just ota-artifact`).
@@ -88,12 +92,21 @@ OTA artifact: `target/thumbv6m-none-eabi/release/scoreboard-ctrl.bin` (`just ota
 
 Measured release ACTIVE image (simulate, with cyw43 firmware + UI) is roughly **~460 KiB**; ACTIVE leaves ~400 KiB headroom. Re-check with `just size` / `just ota-artifact` after dependency bumps.
 
-### First-time USB flash (boxer-86)
+### First-time OTA flash (probe-rs)
 
-1. `just doctor`
-2. Hold **BOOTSEL**, plug USB, `just flash-bootloader`
-3. Hold **BOOTSEL** again (or wait for remount), `just flash` (or `just flash-hw`)
-4. `just logs` — expect `mark_booted ok` and the Scoreboard AP
+1. `just doctor` — Debug Probe listed and accessible
+2. `just program-ota` — chip-erase, bootloader, ACTIVE app, reset, defmt
+3. Expect `AP up ssid=Scoreboard` then `embassy-boot: mark_booted ok`
+4. Ctrl-C detaches; firmware keeps running. Re-attach with `just attach-ota`
+
+`just program` (no `-ota`) is the standalone image and **overwrites** the bootloader. Use `just program-ota` again before HTTP OTA.
+
+### First-time USB flash (BOOTSEL, no probe)
+
+1. Hold **BOOTSEL**, plug USB, `just flash-bringup` (bootloader + app in one UF2)
+2. Prefer probe-rs for OTA bring-up; a combined UF2 has hung this chip before
+
+Bootloader-only (`just flash-bootloader`) does **not** start WiFi.
 
 ### OTA (after the app is running)
 
@@ -115,7 +128,7 @@ Phone / UI: stay on **Scoreboard**, open `http://192.168.0.1/`, use the OTA file
 
 Requires `nmcli` and `curl`. Pico must already be running (AP up). USB CDC (`just logs`) still works while the laptop is on Scoreboard.
 
-Progress is logged on USB CDC. On success the device `mark_updated`s and soft-resets; embassy-boot swaps DFU→ACTIVE and the new image must call `mark_booted` (it does on startup) or the next reset rolls back.
+Progress is logged on USB CDC. On success the device `mark_updated`s and soft-resets; embassy-boot swaps DFU→ACTIVE. The new image calls `mark_booted` only after the Scoreboard AP and HTTP workers are up; if it hangs before that, the next watchdog or power-cycle rolls back.
 
 Concurrent OTAs are rejected (`503`). Truncated uploads do **not** call `mark_updated`, so the running image stays Booted and will not swap.
 

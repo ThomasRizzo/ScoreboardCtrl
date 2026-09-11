@@ -4,6 +4,8 @@
 //! and `Content-Length` set to the ACTIVE-partition firmware image size.
 //! On success the device marks the DFU image and soft-resets so the bootloader
 //! can swap. Truncated or failed uploads leave state as Booted (no swap).
+//! The new image must call `mark_booted` only after AP + HTTP are up, or the
+//! next reset reverts the swap.
 
 use core::cell::{Cell, RefCell};
 
@@ -14,7 +16,10 @@ use embassy_rp::{
     watchdog::Watchdog,
 };
 use embassy_sync::{
-    blocking_mutex::{raw::{CriticalSectionRawMutex, NoopRawMutex}, Mutex as BlockingMutex},
+    blocking_mutex::{
+        raw::{CriticalSectionRawMutex, NoopRawMutex},
+        Mutex as BlockingMutex,
+    },
     mutex::Mutex,
 };
 use embassy_time::{Duration, Timer};
@@ -86,21 +91,31 @@ impl IntoResponse for OtaReply {
         response_writer: W,
     ) -> Result<ResponseSent, W::Error> {
         match self {
-            Self::Ok => (StatusCode::OK, "OK\n")
-                .write_to(connection, response_writer)
-                .await,
-            Self::Busy => (StatusCode::SERVICE_UNAVAILABLE, "OTA in progress\n")
-                .write_to(connection, response_writer)
-                .await,
-            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg)
-                .write_to(connection, response_writer)
-                .await,
-            Self::PayloadTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "image too large for DFU\n")
-                .write_to(connection, response_writer)
-                .await,
-            Self::Failed(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg)
-                .write_to(connection, response_writer)
-                .await,
+            Self::Ok => {
+                (StatusCode::OK, "OK\n")
+                    .write_to(connection, response_writer)
+                    .await
+            }
+            Self::Busy => {
+                (StatusCode::SERVICE_UNAVAILABLE, "OTA in progress\n")
+                    .write_to(connection, response_writer)
+                    .await
+            }
+            Self::BadRequest(msg) => {
+                (StatusCode::BAD_REQUEST, msg)
+                    .write_to(connection, response_writer)
+                    .await
+            }
+            Self::PayloadTooLarge => {
+                (StatusCode::PAYLOAD_TOO_LARGE, "image too large for DFU\n")
+                    .write_to(connection, response_writer)
+                    .await
+            }
+            Self::Failed(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, msg)
+                    .write_to(connection, response_writer)
+                    .await
+            }
         }
     }
 }
@@ -181,19 +196,13 @@ impl OtaService {
                 let want = core::cmp::min(chunk.len(), content_len - offset);
                 match read_exact_or_eof(&mut body, &mut chunk[..want]).await {
                     Ok(0) => {
-                        ap_log::emit(format_args!(
-                            "OTA truncated at {}/{}",
-                            offset, content_len
-                        ));
+                        ap_log::emit(format_args!("OTA truncated at {}/{}", offset, content_len));
                         log::warn!("OTA truncated at {}/{}", offset, content_len);
                         return Err(OtaError::Truncated);
                     }
                     Ok(n) => {
                         // Feed watchdog before blocking flash work (single-threaded executor).
-                        self.watchdog
-                            .lock()
-                            .await
-                            .feed(Duration::from_secs(8));
+                        self.watchdog.lock().await.feed(Duration::from_secs(8));
 
                         if let Err(_e) = updater.write_firmware(offset, &chunk[..n]) {
                             log_fw_err("write");
@@ -206,10 +215,7 @@ impl OtaService {
                         if offset - last_log >= 32 * 1024 || offset == content_len {
                             last_log = offset;
                             let pct = (offset as u64 * 100 / content_len as u64) as u32;
-                            ap_log::emit(format_args!(
-                                "OTA {}/{} ({}%)",
-                                offset, content_len, pct
-                            ));
+                            ap_log::emit(format_args!("OTA {}/{} ({}%)", offset, content_len, pct));
                             log::info!("OTA {}/{} ({}%)", offset, content_len, pct);
                         }
 
@@ -228,10 +234,7 @@ impl OtaService {
             return Err(OtaError::Truncated);
         }
 
-        self.watchdog
-            .lock()
-            .await
-            .feed(Duration::from_secs(8));
+        self.watchdog.lock().await.feed(Duration::from_secs(8));
 
         if let Err(_e) = updater.mark_updated() {
             log_fw_err("mark_updated");
@@ -245,10 +248,7 @@ impl OtaService {
     }
 }
 
-async fn read_exact_or_eof<R: Read>(
-    reader: &mut R,
-    buf: &mut [u8],
-) -> Result<usize, ()> {
+async fn read_exact_or_eof<R: Read>(reader: &mut R, buf: &mut [u8]) -> Result<usize, ()> {
     let mut filled = 0usize;
     while filled < buf.len() {
         match reader.read(&mut buf[filled..]).await {

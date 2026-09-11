@@ -6,4 +6,5 @@ rustflags = [
     "-Cllvm-args=--inline-threshold=5",
     "-C", "no-vectorize-loops",
 ]
-runner = "elf2uf2-rs -sd"
+# Pico Debug Probe (CMSIS-DAP). Override: CARGO_TARGET_THUMBV6M_NONE_EABI_RUNNER=...
+runner = "probe-rs run --chip RP2040 --probe 2e8a:000c"
