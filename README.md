@@ -60,9 +60,9 @@ Do not use GP1 as a blinky: that pin is the start/stop pulse. GP0 is unused.
 | GP10 | Sec − |
 | GP11 | Clear (score) |
 | GP13 | AUX |
-| GP20 | UART1 TX → MAX3232 (idle in hardware build; used for loopback) |
+| GP20 | UART1 TX → MAX3232 (idle in hardware build; TX used by `just uart-test`) |
 | GP21 | UART1 RX ← SK2229R TX, 38400 (hardware build) |
-| USB CDC | `--features usb-log` only: VSP logs + `ENTERBOOTLOADER` (`just logs`) |
+| USB CDC | `--features usb-log` only: VSP logs + `ENTERBOOTLOADER` (`just logs`); uart-test console (`just uart-console`) |
 | SWD / Pico Debug Probe | defmt RTT (`just program`, `just attach-ota`) |
 | Onboard LED | CYW43 gpio 0 (not GP0); UI under **Dev** |
 
@@ -77,6 +77,8 @@ Nightly Rust and `thumbv6m-none-eabi` (`rust-toolchain.toml`). Default firmware 
 ```bash
 just setup              # toolchain, RP2040 target, elf2uf2-rs, probe-rs
 just test               # check + clippy (hw/sim/ota) + bootloader + host tests
+just uart-test          # SK2229R RS-232 probe (USB CDC + UART1 TX/RX; no Wi-Fi)
+just uart-console       # type `tx <hex>` / `probe` / `replay` on the Pico VSP
 just program            # standalone hardware: probe-rs flash + defmt RTT
 just program-ota        # bootloader + hardware ACTIVE, boot through embassy-boot, defmt
 just attach-ota         # re-attach defmt (no flash)
@@ -85,6 +87,25 @@ just flash              # hardware standalone UF2 via ENTERBOOTLOADER
 just program-sim        # software clock (no SK2229R)
 just --list
 ```
+
+### UART probe (RS-232 TX)
+
+Standalone image in `examples/uart-test.rs`: USB CDC + UART1 only (no AP, OTA, or GPIO). Use it to send bytes on GP20 and watch GP21.
+
+```bash
+just uart-test          # probe-rs download + reset (overwrites bootloader)
+just uart-console       # another terminal: type tx / blast / hunt / listen / replay
+```
+
+| Command | Action |
+|---|---|
+| `tx 60 7a 00 02 06 00` | Send those bytes on UART1 TX |
+| `replay` | Resend the last captured `0x60` clock frame |
+| `probe` | Canned bursts (replay + checksum variants, `00`/`ff`/`55`/`aa`/`60`, `AT`, a `07:30` frame) |
+| `help` | Print the table |
+| `ENTERBOOTLOADER` | UF2 BOOTSEL |
+
+Re-flash production with `just program-ota` when finished.
 
 Pico Debug Probe udev (once): `sudo cp scripts/69-probe-rs.rules /etc/udev/rules.d/` then reload udev. Probe selector is `2e8a:000c`.
 

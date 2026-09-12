@@ -2,6 +2,9 @@
 name = "ScoreboardCtrl"
 version = "0.4.1"
 edition = "2021"
+# uart-test is a [[bin]] at examples/uart-test.rs; don't also pick it up as an example
+# (examples don't get build.rs rustc-link-arg-bins).
+autoexamples = false
 
 [workspace]
 members = [".", "bootloader"]
@@ -14,6 +17,13 @@ path = "src/lib.rs"
 [[bin]]
 name = "scoreboard-ctrl"
 path = "src/main.rs"
+
+# SK2229R RS-232 probe: USB CDC console + UART1 TX/RX. No Wi-Fi / OTA / GPIO.
+# Build: cargo build --release --bin uart-test --no-default-features --features usb-log
+[[bin]]
+name = "uart-test"
+path = "examples/uart-test.rs"
+required-features = ["usb-log"]
 
 [features]
 default = ["simulate"]
@@ -41,6 +51,7 @@ embassy-rp = { version = "0.10.0", features = ["rp2040", "critical-section-impl"
 embassy-sync = "0.8.0"
 embassy-time = "0.5.1"
 embassy-usb-logger = { version = "0.6.0", optional = true }
+embedded-io-async = "0.7.0"
 embedded-storage = { version = "0.3.1", optional = true }
 git-testament = { version = "0.2.6", default-features = false }
 log = { version = "0.4.34", default-features = false }

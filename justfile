@@ -4,6 +4,7 @@
 # Dev: Pico Debug Probe (CMSIS-DAP) + probe-rs + defmt RTT.
 # Recipes default to a wired SK2229R (no simulate). Add -sim for the software clock.
 #   just program         standalone hardware: build, flash, defmt
+#   just uart-test       SK2229R RS-232 probe (USB CDC + UART1 TX/RX, no Wi-Fi)
 #   just program-ota     bootloader + ACTIVE app, reset through embassy-boot, defmt
 #   just ota             POST hardware ACTIVE .bin (needs program-ota image + AP up)
 #   just program-sim / just ota-sim / just flash-sim   software scoreboard
@@ -99,8 +100,12 @@ release:
 release-sim:
     cargo build --release
 
+# Type-check SK2229R UART probe (USB CDC + UART1, no Wi-Fi)
+check-uart-test:
+    cargo check --bin uart-test --no-default-features --features usb-log
+
 # Compile-check + clippy for hardware and sim cfgs, plus host unit tests
-test: check clippy check-sim clippy-sim check-bootloader check-ota clippy-ota check-ota-sim clippy-ota-sim test-host
+test: check clippy check-sim clippy-sim check-bootloader check-ota clippy-ota check-ota-sim clippy-ota-sim check-uart-test clippy-uart-test test-host
 
 # Format Rust sources with rustfmt
 fmt:
@@ -125,6 +130,10 @@ clippy-ota:
 # Lint embassy-boot ACTIVE simulator image
 clippy-ota-sim:
     cargo clippy --features ota -- -W clippy::all
+
+# Lint UART probe binary
+clippy-uart-test:
+    cargo clippy --bin uart-test --no-default-features --features usb-log -- -W clippy::all
 
 # Host tests for decode + DHCP/DNS helpers
 test-host:
@@ -526,6 +535,62 @@ _serial_follow port:
       # tr -d '\r' so leftover CR cannot become an extra newline
       tr -d '\r' < "$port"
     fi
+
+uart_test_bin := "uart-test"
+uart_test_elf := "target" / target / "release" / uart_test_bin
+
+# Standalone SK2229R UART probe: USB CDC + UART1 TX/RX, no Wi-Fi / OTA / GPIO.
+# Overwrites embassy-boot (same as `just program`). Re-flash with `just program-ota` after.
+uart-test:
+    #!/usr/bin/env bash
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    cargo build --release --bin {{ uart_test_bin }} --no-default-features --features usb-log
+    probe-rs download --chip {{ chip }} --probe {{ probe }} {{ uart_test_elf }}
+    probe-rs reset --chip {{ chip }} --probe {{ probe }}
+    echo "flashed {{ uart_test_bin }}; CDC console: just uart-console"
+
+# Bidirectional USB CDC: print logs, send stdin lines (tx / replay / probe / help)
+uart-console SERIAL=serial:
+    #!/usr/bin/env bash
+    port="{{ SERIAL }}"
+    if [[ ! -e "$port" ]]; then
+      echo "no serial device at $port (plug in the Pico USB, not BOOTSEL)"
+      ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || true
+      exit 1
+    fi
+    if ! command -v python3 >/dev/null || ! python3 -c "import serial" 2>/dev/null; then
+      echo "uart-console needs python3 + pyserial (pip install pyserial)"
+      exit 1
+    fi
+    echo "CDC $port  (tx <hex> | blast <hex> | replay | probe | hunt | listen | help | ENTERBOOTLOADER; Ctrl-C quit)"
+    python3 - "$port" <<'PY'
+    import sys, threading, serial
+    ser = serial.Serial(sys.argv[1], 115200, timeout=0.2)
+
+    def reader():
+        buf = b""
+        try:
+            while True:
+                chunk = ser.read(256)
+                if not chunk:
+                    continue
+                buf += chunk.replace(b"\r", b"")
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    sys.stdout.buffer.write(line + b"\n")
+                    sys.stdout.flush()
+        except (OSError, serial.SerialException):
+            pass
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    try:
+        for line in sys.stdin:
+            ser.write(line.encode("utf-8", "replace"))
+            ser.flush()
+    except KeyboardInterrupt:
+        pass
+    PY
 
 # USB CDC log stream (VSP) from embassy-usb-logger
 logs SERIAL=serial:
