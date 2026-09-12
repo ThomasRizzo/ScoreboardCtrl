@@ -100,8 +100,11 @@ just uart-console       # another terminal: type tx / blast / hunt / listen / re
 | Command | Action |
 |---|---|
 | `tx 60 7a 00 02 06 00` | Send those bytes on UART1 TX |
+| `blast <hex>` | Repeat that payload for 500 ms |
 | `replay` | Resend the last captured `0x60` clock frame |
 | `probe` | Canned bursts (replay + checksum variants, `00`/`ff`/`55`/`aa`/`60`, `AT`, a `07:30` frame) |
+| `hunt` | Framed commands in RX gaps; log stray (non-clock) RX |
+| `listen` | 20 s stray watch (press wireless remote / buttons) |
 | `help` | Print the table |
 | `ENTERBOOTLOADER` | UF2 BOOTSEL |
 
