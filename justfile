@@ -340,11 +340,16 @@ flash-bringup: uf2-bootloader uf2
     @echo "Pico should leave BOOTSEL and boot the app. Watch: just logs"
 
 # Optimized ACTIVE firmware (embassy-boot, wired scoreboard)
+# DEFMT_LOG is compile-time: unset = error-only, which strips UART info logs.
 release-ota:
+    #!/usr/bin/env bash
+    export DEFMT_LOG="${DEFMT_LOG:-info}"
     cargo build --release --no-default-features --features ota
 
 # Optimized ACTIVE firmware with simulator
 release-ota-sim:
+    #!/usr/bin/env bash
+    export DEFMT_LOG="${DEFMT_LOG:-info}"
     cargo build --release --features ota
 
 # Raw ACTIVE-partition image for HTTP OTA (hardware; must be --features ota)

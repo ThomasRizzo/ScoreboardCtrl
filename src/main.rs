@@ -52,10 +52,9 @@ use picoserve::{
     AppBuilder, AppRouter, ResponseSent,
 };
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
+use scoreboard_ctrl::decode::clock_is_running;
 #[cfg(not(feature = "simulate"))]
-use scoreboard_ctrl::decode::{
-    infer_running, parse_clock_packet, total_seconds, write_hex, RunUpdate, PACKET_LEN, PACKET_SOF,
-};
+use scoreboard_ctrl::decode::{parse_clock_packet, write_hex, PACKET_LEN, PACKET_SOF};
 
 git_testament_macros!(fw);
 
@@ -72,17 +71,19 @@ const GIT_SHORT: &str = if GIT_HASH.len() >= 7 {
 embassy_rp::bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<embassy_rp::peripherals::USB>;
-    UART0_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART0>;
+    UART1_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART1>;
     DMA_IRQ_0 => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
-        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>;
+        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>,
+        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>;
 });
 
 #[cfg(not(feature = "usb-log"))]
 embassy_rp::bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<embassy_rp::peripherals::PIO0>;
-    UART0_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART0>;
+    UART1_IRQ => embassy_rp::uart::InterruptHandler<embassy_rp::peripherals::UART1>;
     DMA_IRQ_0 => dma::InterruptHandler<embassy_rp::peripherals::DMA_CH0>,
-        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>;
+        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH1>,
+        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>;
 });
 
 const WIFI_SSID: &str = "Scoreboard";
@@ -118,6 +119,7 @@ enum Command {
     LedOn,
     LedOff,
     SetTimer { min: u8, sec: u8 },
+    Aux,
 }
 
 struct Io {
@@ -127,6 +129,12 @@ struct Io {
     away_inc: Output<'static>,
     away_dec: Output<'static>,
     reset: Output<'static>,
+    min_inc: Output<'static>,
+    min_dec: Output<'static>,
+    sec_inc: Output<'static>,
+    sec_dec: Output<'static>,
+    clear: Output<'static>,
+    aux: Output<'static>,
 }
 
 #[derive(Clone, Copy)]
@@ -135,14 +143,16 @@ struct SharedControl(&'static Mutex<Cs, Control<'static>>);
 const PERIOD_MIN: u8 = 7;
 const PERIOD_SEC: u8 = 30;
 
-#[derive(Clone, Copy, serde::Serialize)]
+#[derive(Clone, Copy)]
 struct ScoreboardState {
     minutes: u8,
     seconds: u8,
     running: bool,
+    /// Pico-origin only. SK2229R UART does not carry scores.
     home: u16,
     away: u16,
     led: bool,
+    last_change: Option<Instant>,
 }
 
 impl Default for ScoreboardState {
@@ -154,7 +164,30 @@ impl Default for ScoreboardState {
             home: 0,
             away: 0,
             led: false,
+            last_change: None,
         }
+    }
+}
+
+impl ScoreboardState {
+    fn set_clock(&mut self, minutes: u8, seconds: u8) {
+        if self.minutes != minutes || self.seconds != seconds {
+            self.last_change = Some(Instant::now());
+        }
+        self.minutes = minutes;
+        self.seconds = seconds;
+        self.refresh_running();
+    }
+
+    fn age_ms(&self) -> u32 {
+        match self.last_change {
+            Some(t) => t.elapsed().as_millis().min(u32::MAX as u64) as u32,
+            None => u32::MAX,
+        }
+    }
+
+    fn refresh_running(&mut self) {
+        self.running = clock_is_running(self.minutes, self.seconds, self.age_ms() as u64);
     }
 }
 
@@ -425,6 +458,13 @@ impl AppBuilder for AppProps {
                 }),
             )
             .route(
+                "/api/ctrl/aux",
+                post(move || async move {
+                    let _ = cmd.send(Command::Aux).await;
+                    "OK"
+                }),
+            )
+            .route(
                 (
                     "/api/timer/set",
                     parse_path_segment::<u8>(),
@@ -438,7 +478,9 @@ impl AppBuilder for AppProps {
             .route(
                 "/api/status",
                 get(move || async move {
-                    let s = *scoreboard.0.lock().await;
+                    let mut s = scoreboard.0.lock().await;
+                    s.refresh_running();
+                    let s = *s;
                     Json(StatusJson {
                         time: TimeStr::from_parts(s.minutes, s.seconds),
                         running: s.running,
@@ -449,6 +491,7 @@ impl AppBuilder for AppProps {
                         ver: VERSION,
                         git: GIT_SHORT,
                         date: GIT_DATE,
+                        age_ms: s.age_ms(),
                     })
                 }),
             );
@@ -505,6 +548,7 @@ struct StatusJson {
     ver: &'static str,
     git: &'static str,
     date: &'static str,
+    age_ms: u32,
 }
 
 async fn pulse(pin: &mut Output<'static>) {
@@ -526,7 +570,15 @@ async fn blink_onboard(control: SharedControl, hold_led: bool) {
 #[embassy_executor::task]
 async fn heartbeat_task(control: SharedControl, scoreboard: SharedScoreboard) -> ! {
     loop {
-        let hold = scoreboard.0.lock().await.led;
+        let hold = {
+            let mut s = scoreboard.0.lock().await;
+            let was = s.running;
+            s.refresh_running();
+            if was && !s.running {
+                log::info!("clock frozen -> stopped");
+            }
+            s.led
+        };
         if hold {
             control.0.lock().await.gpio_set(0, true).await;
             Timer::after_millis(200).await;
@@ -550,8 +602,12 @@ async fn board_task(
 ) -> ! {
     let mut pending_home_dec = 0u16;
     let mut pending_away_dec = 0u16;
+    let mut pending_min: i16 = 0;
+    let mut pending_sec: i16 = 0;
     loop {
-        let cmd = if pending_home_dec > 0 || pending_away_dec > 0 {
+        let has_pending =
+            pending_home_dec > 0 || pending_away_dec > 0 || pending_min != 0 || pending_sec != 0;
+        let cmd = if has_pending {
             receiver.try_receive().ok()
         } else {
             Some(receiver.receive().await)
@@ -576,18 +632,20 @@ async fn board_task(
                         pulse(&mut io.start).await;
                         blink_onboard(control, led).await;
                         let mut s = scoreboard.0.lock().await;
-                        s.running = match cmd {
+                        let start = match cmd {
                             Command::Start => true,
                             Command::Stop => false,
                             _ => !s.running,
                         };
+                        s.last_change = if start { Some(Instant::now()) } else { None };
+                        s.refresh_running();
                         log::info!("sim running={}", s.running);
                     }
                     #[cfg(not(feature = "simulate"))]
                     {
-                        // Physical start/stop on the SK2229R can change the clock
-                        // independently. Only pulse when our UART-inferred flag
-                        // disagrees with the requested state; UART remains truth.
+                        // GP1 is a toggle. Pulse only when UART-inferred state
+                        // disagrees, so a physical start/stop on the SK2229R is
+                        // not undone. `running` itself is never written here.
                         let running = scoreboard.0.lock().await.running;
                         let pulse_needed = match cmd {
                             Command::Start => !running,
@@ -596,12 +654,6 @@ async fn board_task(
                         };
                         if pulse_needed {
                             pulse(&mut io.start).await;
-                            let mut s = scoreboard.0.lock().await;
-                            s.running = match cmd {
-                                Command::Start => true,
-                                Command::Stop => false,
-                                _ => !running,
-                            };
                         }
                         blink_onboard(control, led).await;
                         log::info!("start/stop pulse={} was_running={}", pulse_needed, running);
@@ -692,11 +744,9 @@ async fn board_task(
                         s.away = 0;
                         (home, away, s.led)
                     };
-                    #[cfg(not(feature = "simulate"))]
-                    {
-                        pending_home_dec = home;
-                        pending_away_dec = away;
-                    }
+                    pending_home_dec = 0;
+                    pending_away_dec = 0;
+                    pulse(&mut io.clear).await;
                     blink_onboard(control, led).await;
                     log::info!("scores 0 (was {}-{})", home, away);
                 }
@@ -704,7 +754,8 @@ async fn board_task(
                     #[cfg(feature = "simulate")]
                     {
                         let mut s = scoreboard.0.lock().await;
-                        s.running = false;
+                        s.last_change = None;
+                        s.refresh_running();
                         log::info!("sim reset stop {:02}:{:02}", s.minutes, s.seconds);
                     }
                     let led = scoreboard.0.lock().await.led;
@@ -714,17 +765,37 @@ async fn board_task(
                     log::info!("pulse reset");
                 }
                 Command::SetTimer { min, sec } => {
+                    let min = min.min(99);
+                    let sec = sec.min(59);
                     #[cfg(feature = "simulate")]
                     {
                         let mut s = scoreboard.0.lock().await;
-                        s.minutes = min.min(99);
-                        s.seconds = sec.min(59);
-                        s.running = false;
-                        log::info!("sim set {:02}:{:02}", s.minutes, s.seconds);
+                        s.set_clock(min, sec);
+                        s.last_change = None;
+                        s.refresh_running();
+                        log::info!("sim set {:02}:{:02}", min, sec);
                     }
                     #[cfg(not(feature = "simulate"))]
-                    log::info!("set-timer ignored (hardware mode)");
-                    let _ = (min, sec);
+                    {
+                        let s = scoreboard.0.lock().await;
+                        pending_min = min as i16 - s.minutes as i16;
+                        pending_sec = sec as i16 - s.seconds as i16;
+                        log::info!(
+                            "set-timer {:02}:{:02} from {:02}:{:02} dmin={} dsec={}",
+                            min,
+                            sec,
+                            s.minutes,
+                            s.seconds,
+                            pending_min,
+                            pending_sec
+                        );
+                    }
+                }
+                Command::Aux => {
+                    let led = scoreboard.0.lock().await.led;
+                    pulse(&mut io.aux).await;
+                    blink_onboard(control, led).await;
+                    log::info!("pulse aux");
                 }
             }
             continue;
@@ -736,6 +807,18 @@ async fn board_task(
         } else if pending_away_dec > 0 {
             pulse(&mut io.away_dec).await;
             pending_away_dec -= 1;
+        } else if pending_min > 0 {
+            pulse(&mut io.min_inc).await;
+            pending_min -= 1;
+        } else if pending_min < 0 {
+            pulse(&mut io.min_dec).await;
+            pending_min += 1;
+        } else if pending_sec > 0 {
+            pulse(&mut io.sec_inc).await;
+            pending_sec -= 1;
+        } else if pending_sec < 0 {
+            pulse(&mut io.sec_dec).await;
+            pending_sec += 1;
         }
     }
 }
@@ -748,12 +831,12 @@ async fn timer_task(scoreboard: SharedScoreboard) -> ! {
         let mut s = scoreboard.0.lock().await;
         if s.running {
             if s.seconds > 0 {
-                s.seconds -= 1;
+                s.set_clock(s.minutes, s.seconds - 1);
             } else if s.minutes > 0 {
-                s.minutes -= 1;
-                s.seconds = 59;
+                s.set_clock(s.minutes - 1, 59);
             } else {
-                s.running = false;
+                s.last_change = None;
+                s.refresh_running();
                 log::info!("sim timer done");
             }
         }
@@ -766,91 +849,80 @@ async fn read_serial(
     mut rx: embassy_rp::uart::UartRx<'static, embassy_rp::uart::Async>,
     scoreboard: SharedScoreboard,
 ) -> ! {
-    let mut byte_buf = [0; 1];
+    let mut dma_buf = [0u8; 32];
     let mut packet_buf = [0u8; PACKET_LEN];
     let mut buf_idx = 0usize;
-    let mut raw = [0u8; 16];
-    let mut raw_n = 0usize;
-    let mut prev_total: Option<u16> = None;
-    let mut last_change = Instant::now();
-    log::info!("UART 38400 GP17 raw dump on CDC");
+    let mut last_logged = [0u8; PACKET_LEN];
+    let mut have_logged = false;
+    let mut last_raw = Instant::now();
+    let mut skip = [0u8; 16];
+    let mut skip_n = 0usize;
+    log::info!("UART1 38400 GP21 RX (GP20 TX)");
     loop {
-        match rx.read(&mut byte_buf).await {
+        match rx.read(&mut dma_buf).await {
             Ok(_) => {
-                let byte = byte_buf[0];
-                raw[raw_n] = byte;
-                raw_n += 1;
-                if raw_n == raw.len() {
-                    let mut hex = [0u8; 47];
-                    let n = write_hex(&raw, &mut hex);
-                    log::info!("UART0 {}", core::str::from_utf8(&hex[..n]).unwrap_or("?"));
-                    raw_n = 0;
+                let now = Instant::now();
+                if now.saturating_duration_since(last_raw).as_millis() >= 2000 {
+                    last_raw = now;
+                    let mut hex = [0u8; 95];
+                    let n = write_hex(&dma_buf, &mut hex);
+                    log::info!(
+                        "UART raw {}",
+                        core::str::from_utf8(&hex[..n]).unwrap_or("?")
+                    );
                 }
-                if buf_idx == 0 {
-                    if byte != PACKET_SOF {
+                for &byte in dma_buf.iter() {
+                    if buf_idx == 0 {
+                        if byte != PACKET_SOF {
+                            skip[skip_n] = byte;
+                            skip_n += 1;
+                            if skip_n == skip.len() {
+                                let mut hex = [0u8; 47];
+                                let n = write_hex(&skip, &mut hex);
+                                log::info!(
+                                    "UART skip {}",
+                                    core::str::from_utf8(&hex[..n]).unwrap_or("?")
+                                );
+                                skip_n = 0;
+                            }
+                            continue;
+                        }
+                        packet_buf[0] = byte;
+                        buf_idx = 1;
                         continue;
                     }
-                    packet_buf[0] = byte;
-                    buf_idx = 1;
-                    continue;
-                }
-                packet_buf[buf_idx] = byte;
-                buf_idx += 1;
-                if buf_idx < PACKET_LEN {
-                    continue;
-                }
-                buf_idx = 0;
-                let Some((minutes, seconds)) = parse_clock_packet(&packet_buf) else {
-                    continue;
-                };
-                let total = total_seconds(minutes, seconds);
-                let now = Instant::now();
-                let Some(prev) = prev_total else {
-                    prev_total = Some(total);
-                    last_change = now;
-                    let mut s = scoreboard.0.lock().await;
-                    s.minutes = minutes;
-                    s.seconds = seconds;
-                    if total == 0 {
-                        s.running = false;
+                    packet_buf[buf_idx] = byte;
+                    buf_idx += 1;
+                    if buf_idx < PACKET_LEN {
+                        continue;
                     }
-                    log::info!("UART sync {:02}:{:02}", minutes, seconds);
-                    continue;
-                };
-                let unchanged_ms = if total == prev {
-                    now.saturating_duration_since(last_change).as_millis()
-                } else {
-                    last_change = now;
-                    0
-                };
-                let update = infer_running(prev, minutes, seconds, unchanged_ms);
-                prev_total = Some(total);
-                let mut s = scoreboard.0.lock().await;
-                let time_changed = s.minutes != minutes || s.seconds != seconds;
-                s.minutes = minutes;
-                s.seconds = seconds;
-                match update {
-                    RunUpdate::Force(running) => s.running = running,
-                    RunUpdate::Keep => {}
-                }
-                if time_changed {
-                    log::info!(
-                        "UART {:02x}:{:02x} -> {:02}:{:02} running={}",
-                        packet_buf[1],
-                        packet_buf[2],
-                        minutes,
-                        seconds,
-                        s.running
-                    );
+                    buf_idx = 0;
+                    let Some((minutes, seconds)) = parse_clock_packet(&packet_buf) else {
+                        continue;
+                    };
+                    let mut s = scoreboard.0.lock().await;
+                    s.set_clock(minutes, seconds);
+                    let running = s.running;
+                    drop(s);
+                    if !have_logged || packet_buf != last_logged {
+                        last_logged = packet_buf;
+                        have_logged = true;
+                        log::info!(
+                            "UART {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} -> {:02}:{:02} running={}",
+                            packet_buf[0],
+                            packet_buf[1],
+                            packet_buf[2],
+                            packet_buf[3],
+                            packet_buf[4],
+                            packet_buf[5],
+                            minutes,
+                            seconds,
+                            running
+                        );
+                    }
                 }
             }
             Err(e) => {
-                if raw_n > 0 {
-                    let mut hex = [0u8; 47];
-                    let n = write_hex(&raw[..raw_n], &mut hex);
-                    log::info!("UART0 {}", core::str::from_utf8(&hex[..n]).unwrap_or("?"));
-                    raw_n = 0;
-                }
                 log::warn!("UART {:?}", e);
                 buf_idx = 0;
             }
@@ -1067,12 +1139,18 @@ async fn main(spawner: embassy_executor::Spawner) {
     spawner.spawn(net_services::mdns_task(stack).unwrap());
 
     let io = Io {
-        start: Output::new(p.PIN_0, Level::Low),
-        home_inc: Output::new(p.PIN_1, Level::Low),
-        home_dec: Output::new(p.PIN_2, Level::Low),
-        away_inc: Output::new(p.PIN_3, Level::Low),
-        away_dec: Output::new(p.PIN_4, Level::Low),
-        reset: Output::new(p.PIN_5, Level::Low),
+        start: Output::new(p.PIN_1, Level::Low),
+        home_inc: Output::new(p.PIN_2, Level::Low),
+        home_dec: Output::new(p.PIN_3, Level::Low),
+        away_inc: Output::new(p.PIN_4, Level::Low),
+        away_dec: Output::new(p.PIN_5, Level::Low),
+        reset: Output::new(p.PIN_6, Level::Low),
+        min_inc: Output::new(p.PIN_7, Level::Low),
+        min_dec: Output::new(p.PIN_8, Level::Low),
+        sec_inc: Output::new(p.PIN_9, Level::Low),
+        sec_dec: Output::new(p.PIN_10, Level::Low),
+        clear: Output::new(p.PIN_11, Level::Low),
+        aux: Output::new(p.PIN_13, Level::Low),
     };
 
     let channel = make_static!(Channel<Cs, Command, 8>, Channel::new());
@@ -1086,7 +1164,17 @@ async fn main(spawner: embassy_executor::Spawner) {
     {
         let mut uart_config = embassy_rp::uart::Config::default();
         uart_config.baudrate = 38400;
-        let rx = embassy_rp::uart::UartRx::new(p.UART0, p.PIN_17, Irqs, p.DMA_CH1, uart_config);
+        // PCB: UART1 TX=GP20, RX=GP21 through the MAX3232.
+        let uart = embassy_rp::uart::Uart::new(
+            p.UART1,
+            p.PIN_20,
+            p.PIN_21,
+            Irqs,
+            p.DMA_CH2,
+            p.DMA_CH1,
+            uart_config,
+        );
+        let (_tx, rx) = uart.split();
         spawner.spawn(read_serial(rx, scoreboard).unwrap());
     }
 

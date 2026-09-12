@@ -12,12 +12,12 @@ Default period clock is **7:30** (polo).
 
 | Build | What it does |
 |---|---|
-| **hardware** (`just` default, `--no-default-features`) | 50 ms pulses on GP0–GP5 through a CD74HCT4066, time from UART0/GP17 at 38400. |
+| **hardware** (`just` default, `--no-default-features`) | 50 ms pulses on GP1–GP11 / GP13 through a CD74HCT4066, time from UART1 GP21 RX at 38400. |
 | **simulate** (`just …-sim`, cargo feature `simulate`) | Software timer and scores, onboard LED. Use when the SK2229R is not wired. |
 
 `cargo build` still enables `simulate` unless you pass `--no-default-features`. `just` recipes pass that flag for you.
 
-Do not use GP0 as a blinky: that pin is the start/stop pulse.
+Do not use GP1 as a blinky: that pin is the start/stop pulse. GP0 is unused.
 
 ## Phone UI
 
@@ -42,23 +42,31 @@ Do not use GP0 as a blinky: that pin is the start/stop pulse.
 - [GameCraft SK2229R](https://www.amazon.com/BSN-Multisport-Indoor-Tabletop-Scoreboard/dp/B003SFP4CI) scoreboard
 - [Raspberry Pi Pico W](https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.html#raspberry-pi-pico-w) — AP, UI, button pulses, UART time
 - [CD74HCT4066](https://www.ti.com/lit/ds/symlink/cd74hct4066.pdf) analog switch (scoreboard buttons are 5 V, originally CD4066BE)
-- [MAX3232](https://www.ti.com/lit/ds/symlink/max3232.pdf) RS-232 (scoreboard) to Pico TTL on GP17
+- [MAX3232](https://www.ti.com/lit/ds/symlink/max3232.pdf) RS-232 (scoreboard) to Pico TTL UART1 (GP20 TX / GP21 RX)
 - Custom PCB: [ScoreBoardPcb](https://github.com/ThomasRizzo/ScoreBoardPcb)
 
 | Pin | Function |
 |---|---|
-| GP0 | Start / stop pulse |
-| GP1 | Home + |
-| GP2 | Home − |
-| GP3 | Away + |
-| GP4 | Away − |
-| GP5 | Hardware reset pulse |
-| GP17 | UART0 RX ← SK2229R TX, 38400 (hardware build, RX only) |
+| GP0 | unused |
+| GP1 | Start / stop |
+| GP2 | Home + |
+| GP3 | Home − |
+| GP4 | Away + |
+| GP5 | Away − |
+| GP6 | Reset (time) |
+| GP7 | Min + |
+| GP8 | Min − |
+| GP9 | Sec + |
+| GP10 | Sec − |
+| GP11 | Clear (score) |
+| GP13 | AUX |
+| GP20 | UART1 TX → MAX3232 (idle in hardware build; used for loopback) |
+| GP21 | UART1 RX ← SK2229R TX, 38400 (hardware build) |
 | USB CDC | `--features usb-log` only: VSP logs + `ENTERBOOTLOADER` (`just logs`) |
 | SWD / Pico Debug Probe | defmt RTT (`just program`, `just attach-ota`) |
 | Onboard LED | CYW43 gpio 0 (not GP0); UI under **Dev** |
 
-SK2229R packet (6 bytes, UART 38400): `00 | min | sec | shotclock | 3F | crc`. Time bytes decode as `(0xFF - b) >> 1`. Frames are accepted only with the `3F` marker and minutes ≤ 99 / seconds ≤ 59; a `0x00` CRC or shot-clock byte does not resync the parser. Hardware builds dump every UART0 byte as hex on the log facade (defmt RTT, or USB CDC with `--features usb-log`) so unused fields (shot clock, CRC) and any other traffic are visible. Hardware `running` follows the clock: time remaining decreasing means running, `00:00` or a frozen display means stopped (the board’s own start/stop button is independent of GP0). Scores are 0–99.
+SK2229R packet (6 bytes, UART 38400): `60 | chk | unk0 | minutes | seconds | unk1`. Minutes and seconds are raw binary. Frames start with `0x60`; minutes ≤ 99 / seconds ≤ 59. `chk` / `unk0` / `unk1` are still being reverse-engineered. Hardware builds dump every UART1 byte as hex on the log facade (defmt RTT, or USB CDC with `--features usb-log`) so unused fields (shot clock, CRC) and any other traffic are visible. The SK2229R’s own buttons can change time and start/stop at any time. Hardware `time` and `running` follow UART only: stopped if MM:SS is `00:00` or unchanged for ≥2 s; otherwise running. Start/stop GPIO is a toggle and is pulsed only when that UART flag disagrees with the request — it does not write `running`. Scores are 0–99 and exist only on the Pico (UART does not carry home/away; a score change on the board cannot be mirrored).
 
 The AP is open (no password). Anyone on **Scoreboard** can change the clock and scores.
 
@@ -147,7 +155,7 @@ Concurrent OTAs are rejected (`503`). Truncated uploads and bodies larger than A
 
 ```
 GET  /                         UI
-GET  /api/status               JSON: time, running, home, away, led, sim, ver, git, date
+GET  /api/status               JSON: time, running, home, away, led, sim, ver, git, date, age_ms
 POST /api/ctrl/start
 POST /api/ctrl/stop
 POST /api/ctrl/start-stop
@@ -156,8 +164,9 @@ POST /api/ctrl/home-inc
 POST /api/ctrl/home-dec
 POST /api/ctrl/away-inc
 POST /api/ctrl/away-dec
-POST /api/ctrl/scores-zero
-POST /api/timer/set/{min}/{sec}   (simulate only; hardware Reset pulses GP5)
+POST /api/ctrl/scores-zero        (hardware: one pulse on GP11 clear)
+POST /api/ctrl/aux                 (hardware: pulse GP13)
+POST /api/timer/set/{min}/{sec}   (hardware: GP7–GP10 pulses from current UART time; simulate: set software clock)
 POST /api/ota                     (--features ota) raw ACTIVE .bin, max 896 KiB
 POST /led/on
 POST /led/off
@@ -168,7 +177,7 @@ Unknown GETs (captive-portal probes such as `/generate_204`) 302 to `http://192.
 `GET /api/status` example:
 
 ```json
-{"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":false,"ver":"0.4.1","git":"abc1234","date":"2026-09-10"}
+{"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":false,"ver":"0.4.1","git":"abc1234","date":"2026-09-10","age_ms":120}
 ```
 
 ## Layout
