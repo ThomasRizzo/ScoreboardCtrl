@@ -108,7 +108,10 @@ impl IntoResponse for OtaReply {
                     .await
             }
             Self::PayloadTooLarge => {
-                (StatusCode::PAYLOAD_TOO_LARGE, "image too large for ACTIVE\n")
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "image too large for ACTIVE\n",
+                )
                     .write_to(connection, response_writer)
                     .await
             }
