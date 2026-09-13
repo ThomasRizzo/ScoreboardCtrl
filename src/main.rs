@@ -52,7 +52,9 @@ use picoserve::{
     AppBuilder, AppRouter, ResponseSent,
 };
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
-use scoreboard_ctrl::decode::clock_is_running;
+#[cfg(not(feature = "simulate"))]
+use scoreboard_ctrl::decode::start_stop_pulse_needed;
+use scoreboard_ctrl::decode::{clock_is_running, resolve_pending_running};
 #[cfg(not(feature = "simulate"))]
 use scoreboard_ctrl::decode::{parse_clock_packet, write_hex, PACKET_LEN, PACKET_SOF};
 
@@ -153,6 +155,9 @@ struct ScoreboardState {
     away: u16,
     led: bool,
     last_change: Option<Instant>,
+    /// Desired `running` after a GP1 pulse, until UART agrees (or 2 s elapse).
+    pending_running: Option<bool>,
+    pending_at: Option<Instant>,
 }
 
 impl Default for ScoreboardState {
@@ -165,6 +170,8 @@ impl Default for ScoreboardState {
             away: 0,
             led: false,
             last_change: None,
+            pending_running: None,
+            pending_at: None,
         }
     }
 }
@@ -186,8 +193,34 @@ impl ScoreboardState {
         }
     }
 
+    fn pending_age_ms(&self) -> u64 {
+        match self.pending_at {
+            Some(t) => t.elapsed().as_millis(),
+            None => 0,
+        }
+    }
+
     fn refresh_running(&mut self) {
         self.running = clock_is_running(self.minutes, self.seconds, self.age_ms() as u64);
+        self.pending_running =
+            resolve_pending_running(self.pending_running, self.running, self.pending_age_ms());
+        if self.pending_running.is_none() {
+            self.pending_at = None;
+        }
+    }
+
+    /// Pulse GP1 if the effective run state disagrees with `want` (`None` = toggle).
+    /// Does not write UART `running`.
+    #[cfg(not(feature = "simulate"))]
+    fn start_stop_pulse_for(&mut self, want: Option<bool>) -> bool {
+        self.refresh_running();
+        let effective = self.pending_running.unwrap_or(self.running);
+        let pulse_needed = start_stop_pulse_needed(effective, want);
+        if pulse_needed {
+            self.pending_running = Some(want.unwrap_or(!effective));
+            self.pending_at = Some(Instant::now());
+        }
+        pulse_needed
     }
 }
 
@@ -643,20 +676,30 @@ async fn board_task(
                     }
                     #[cfg(not(feature = "simulate"))]
                     {
-                        // GP1 is a toggle. Pulse only when UART-inferred state
-                        // disagrees, so a physical start/stop on the SK2229R is
-                        // not undone. `running` itself is never written here.
-                        let running = scoreboard.0.lock().await.running;
-                        let pulse_needed = match cmd {
-                            Command::Start => !running,
-                            Command::Stop => running,
-                            _ => true,
+                        // GP1 is a toggle. Pulse only when the effective run
+                        // state disagrees. UART `running` lags (next tick, or
+                        // up to 2 s freeze), so a pending desired state covers
+                        // retries until confirmation. Never write `running`.
+                        let (pulse_needed, running, pending) = {
+                            let mut s = scoreboard.0.lock().await;
+                            let want = match cmd {
+                                Command::Start => Some(true),
+                                Command::Stop => Some(false),
+                                _ => None,
+                            };
+                            let pulse_needed = s.start_stop_pulse_for(want);
+                            (pulse_needed, s.running, s.pending_running)
                         };
                         if pulse_needed {
                             pulse(&mut io.start).await;
                         }
                         blink_onboard(control, led).await;
-                        log::info!("start/stop pulse={} was_running={}", pulse_needed, running);
+                        log::info!(
+                            "start/stop pulse={} was_running={} pending={:?}",
+                            pulse_needed,
+                            running,
+                            pending
+                        );
                     }
                 }
                 Command::HomeInc => {
@@ -751,6 +794,8 @@ async fn board_task(
                     log::info!("scores 0 (was {}-{})", home, away);
                 }
                 Command::Reset => {
+                    pending_min = 0;
+                    pending_sec = 0;
                     #[cfg(feature = "simulate")]
                     {
                         let mut s = scoreboard.0.lock().await;
@@ -758,7 +803,12 @@ async fn board_task(
                         s.refresh_running();
                         log::info!("sim reset stop {:02}:{:02}", s.minutes, s.seconds);
                     }
-                    let led = scoreboard.0.lock().await.led;
+                    let led = {
+                        let mut s = scoreboard.0.lock().await;
+                        s.pending_running = None;
+                        s.pending_at = None;
+                        s.led
+                    };
                     pulse(&mut io.reset).await;
                     blink_onboard(control, led).await;
                     #[cfg(not(feature = "simulate"))]
@@ -777,17 +827,26 @@ async fn board_task(
                     }
                     #[cfg(not(feature = "simulate"))]
                     {
+                        // Min/sec pulses take up to ~8 s. A running clock would
+                        // tick during that train and land off-target, so freeze
+                        // first, then snapshot UART.
+                        let pulse_stop =
+                            scoreboard.0.lock().await.start_stop_pulse_for(Some(false));
+                        if pulse_stop {
+                            pulse(&mut io.start).await;
+                        }
                         let s = scoreboard.0.lock().await;
                         pending_min = min as i16 - s.minutes as i16;
                         pending_sec = sec as i16 - s.seconds as i16;
                         log::info!(
-                            "set-timer {:02}:{:02} from {:02}:{:02} dmin={} dsec={}",
+                            "set-timer {:02}:{:02} from {:02}:{:02} dmin={} dsec={} stop={}",
                             min,
                             sec,
                             s.minutes,
                             s.seconds,
                             pending_min,
-                            pending_sec
+                            pending_sec,
+                            pulse_stop
                         );
                     }
                 }
@@ -807,18 +866,32 @@ async fn board_task(
         } else if pending_away_dec > 0 {
             pulse(&mut io.away_dec).await;
             pending_away_dec -= 1;
-        } else if pending_min > 0 {
-            pulse(&mut io.min_inc).await;
-            pending_min -= 1;
-        } else if pending_min < 0 {
-            pulse(&mut io.min_dec).await;
-            pending_min += 1;
-        } else if pending_sec > 0 {
-            pulse(&mut io.sec_inc).await;
-            pending_sec -= 1;
-        } else if pending_sec < 0 {
-            pulse(&mut io.sec_dec).await;
-            pending_sec += 1;
+        } else if pending_min != 0 || pending_sec != 0 {
+            #[cfg(not(feature = "simulate"))]
+            {
+                // A /start (or physical start) mid-sequence would let the
+                // clock tick again; freeze before more min/sec pulses.
+                // Do not recompute deltas from UART here: confirmation lags
+                // and would double-count pulses already emitted.
+                if scoreboard.0.lock().await.start_stop_pulse_for(Some(false)) {
+                    pulse(&mut io.start).await;
+                    log::info!("set-timer re-stop");
+                    continue;
+                }
+            }
+            if pending_min > 0 {
+                pulse(&mut io.min_inc).await;
+                pending_min -= 1;
+            } else if pending_min < 0 {
+                pulse(&mut io.min_dec).await;
+                pending_min += 1;
+            } else if pending_sec > 0 {
+                pulse(&mut io.sec_inc).await;
+                pending_sec -= 1;
+            } else if pending_sec < 0 {
+                pulse(&mut io.sec_dec).await;
+                pending_sec += 1;
+            }
         }
     }
 }
@@ -830,10 +903,12 @@ async fn timer_task(scoreboard: SharedScoreboard) -> ! {
         Timer::after_secs(1).await;
         let mut s = scoreboard.0.lock().await;
         if s.running {
-            if s.seconds > 0 {
-                s.set_clock(s.minutes, s.seconds - 1);
-            } else if s.minutes > 0 {
-                s.set_clock(s.minutes - 1, 59);
+            let min = s.minutes;
+            let sec = s.seconds;
+            if sec > 0 {
+                s.set_clock(min, sec - 1);
+            } else if min > 0 {
+                s.set_clock(min - 1, 59);
             } else {
                 s.last_change = None;
                 s.refresh_running();

@@ -63,6 +63,29 @@ pub fn clock_is_running(min: u8, sec: u8, unchanged_ms: u64) -> bool {
     total_seconds(min, sec) != 0 && unchanged_ms < STOPPED_AFTER_MS
 }
 
+/// GP1 is a toggle. Pulse when the effective run state disagrees with the
+/// request. `want_running` is `Some` for `/start` and `/stop`, `None` for the
+/// raw `/start-stop` toggle (always pulse).
+pub fn start_stop_pulse_needed(effective_running: bool, want_running: Option<bool>) -> bool {
+    match want_running {
+        Some(want) => want != effective_running,
+        None => true,
+    }
+}
+
+/// Drop a pending desired run state once UART agrees, or once the freeze
+/// window has elapsed without confirmation (missed pulse, or start at 00:00).
+pub fn resolve_pending_running(
+    pending: Option<bool>,
+    uart_running: bool,
+    pending_age_ms: u64,
+) -> Option<bool> {
+    match pending {
+        Some(want) if want != uart_running && pending_age_ms < STOPPED_AFTER_MS => pending,
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,5 +133,37 @@ mod tests {
         let mut out = [0u8; 16];
         let n = write_hex(&[0x00, 0xab, 0x3f], &mut out);
         assert_eq!(&out[..n], b"00 ab 3f");
+    }
+
+    #[test]
+    fn start_stop_idempotent_until_uart() {
+        // /start while stopped, then a retry that already believes running.
+        assert!(start_stop_pulse_needed(false, Some(true)));
+        assert!(!start_stop_pulse_needed(true, Some(true)));
+        // /stop while running, then a retry that already believes stopped.
+        assert!(start_stop_pulse_needed(true, Some(false)));
+        assert!(!start_stop_pulse_needed(false, Some(false)));
+        // Opposite request reverses; raw toggle always pulses.
+        assert!(start_stop_pulse_needed(true, Some(false)));
+        assert!(start_stop_pulse_needed(false, Some(true)));
+        assert!(start_stop_pulse_needed(false, None));
+        assert!(start_stop_pulse_needed(true, None));
+    }
+
+    #[test]
+    fn pending_clears_when_uart_matches_or_times_out() {
+        assert_eq!(resolve_pending_running(Some(true), false, 0), Some(true));
+        assert_eq!(resolve_pending_running(Some(true), true, 100), None);
+        assert_eq!(
+            resolve_pending_running(Some(true), false, STOPPED_AFTER_MS),
+            None
+        );
+        assert_eq!(resolve_pending_running(Some(false), true, 500), Some(false));
+        assert_eq!(
+            resolve_pending_running(Some(false), true, STOPPED_AFTER_MS - 1),
+            Some(false)
+        );
+        assert_eq!(resolve_pending_running(Some(false), false, 500), None);
+        assert_eq!(resolve_pending_running(None, true, 0), None);
     }
 }

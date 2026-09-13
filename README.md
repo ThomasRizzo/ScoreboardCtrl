@@ -66,7 +66,7 @@ Do not use GP1 as a blinky: that pin is the start/stop pulse. GP0 is unused.
 | SWD / Pico Debug Probe | defmt RTT (`just program`, `just attach-ota`) |
 | Onboard LED | CYW43 gpio 0 (not GP0); UI under **Dev** |
 
-SK2229R packet (6 bytes, UART 38400): `60 | chk | unk0 | minutes | seconds | unk1`. Minutes and seconds are raw binary. Frames start with `0x60`; minutes ≤ 99 / seconds ≤ 59. `chk` / `unk0` / `unk1` are still being reverse-engineered. Hardware builds dump every UART1 byte as hex on the log facade (defmt RTT, or USB CDC with `--features usb-log`) so unused fields (shot clock, CRC) and any other traffic are visible. The SK2229R’s own buttons can change time and start/stop at any time. Hardware `time` and `running` follow UART only: stopped if MM:SS is `00:00` or unchanged for ≥2 s; otherwise running. Start/stop GPIO is a toggle and is pulsed only when that UART flag disagrees with the request — it does not write `running`. Scores are 0–99 and exist only on the Pico (UART does not carry home/away; a score change on the board cannot be mirrored).
+SK2229R packet (6 bytes, UART 38400): `60 | chk | unk0 | minutes | seconds | unk1`. Minutes and seconds are raw binary. Frames start with `0x60`; minutes ≤ 99 / seconds ≤ 59. `chk` / `unk0` / `unk1` are still being reverse-engineered. Hardware builds dump every UART1 byte as hex on the log facade (defmt RTT, or USB CDC with `--features usb-log`) so unused fields (shot clock, CRC) and any other traffic are visible. The SK2229R’s own buttons can change time and start/stop at any time. Hardware `time` and `running` follow UART only: stopped if MM:SS is `00:00` or unchanged for ≥2 s; otherwise running. Start/stop GPIO is a toggle and is pulsed only when that UART flag (or a pending desired state from a recent pulse) disagrees with the request — it does not write `running`. Duplicate `/start` or `/stop` before UART confirms (next tick, or up to 2 s freeze) does not pulse again. Hardware `/api/timer/set` stops a running clock before min/sec pulses so the several-second GPIO train cannot race the countdown. Scores are 0–99 and exist only on the Pico (UART does not carry home/away; a score change on the board cannot be mirrored).
 
 The AP is open (no password). Anyone on **Scoreboard** can change the clock and scores.
 
@@ -190,7 +190,7 @@ POST /api/ctrl/away-inc
 POST /api/ctrl/away-dec
 POST /api/ctrl/scores-zero        (hardware: one pulse on GP11 clear)
 POST /api/ctrl/aux                 (hardware: pulse GP13)
-POST /api/timer/set/{min}/{sec}   (hardware: GP7–GP10 pulses from current UART time; simulate: set software clock)
+POST /api/timer/set/{min}/{sec}   (hardware: stop if running, then GP7–GP10 pulses from frozen UART time; simulate: set software clock and stop)
 POST /api/ota                     (--features ota) raw ACTIVE .bin, max 896 KiB
 POST /led/on
 POST /led/off
