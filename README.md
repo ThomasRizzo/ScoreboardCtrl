@@ -206,7 +206,7 @@ Unknown GETs (captive-portal probes such as `/generate_204`) 302 to `http://192.
 {"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":false,"ver":"0.4.1","git":"abc1234","date":"2026-09-10","age_ms":120}
 ```
 
-The phone keeps a `GET /api/events` stream so the clock digit updates when the UART frame (or the simulate tick) changes MM:SS. The same event carries scores, running, and the LED. While the stream is down, the page polls `GET /api/status` every 350 ms.
+The phone keeps a `GET /api/events` stream so the clock digit updates when the UART frame (or the simulate tick) changes MM:SS. The same event carries scores, running, and the LED. While the stream is down, the page polls `GET /api/status` every 350 ms. The path is drawn in [`docs/architecture.html`](docs/architecture.html).
 
 ## Layout
 
@@ -220,6 +220,7 @@ The phone keeps a `GET /api/events` stream so the clock digit updates when the U
 - `src/ap_log.rs` — AP/captive trace via `log`
 - `src/lib.rs` / `src/decode.rs` / `src/net_proto.rs` — host-tested clock decode and DHCP/DNS helpers
 - `index.html` — phone UI (compiled into the firmware)
+- `docs/architecture.html` — tasks and the clock/event flow
 - `justfile` — setup, flash, OTA, probe-rs
 - `scripts/` — probe udev rules, UF2 merge
 - `cyw43-firmware/` — CYW43439 firmware + Pico W NVRAM
