@@ -493,64 +493,60 @@
                 .catch(showErr);
         });
 
+        function applyStatus(data) {
+            document.getElementById('timerDisplay').textContent = data.time;
+            const parts = String(data.time).split(':');
+            const min = parseInt(parts[0], 10) || 0;
+            const sec = parseInt(parts[1], 10) || 0;
+            if (lastMin === 0 && lastSec > 0 && lastSec <= 2 && min === 0 && sec === 0) {
+                buzz();
+            }
+            lastMin = min;
+            lastSec = sec;
+            if (scoreInflight === 0) {
+                home = Math.max(0, Math.min(99, data.home));
+                away = Math.max(0, Math.min(99, data.away));
+                renderScores();
+            }
+            const badge = document.getElementById('modeBadge');
+            const setSection = document.querySelector('.timer-set-section');
+            if (data.sim) {
+                badge.textContent = 'simulate — no scoreboard attached';
+                badge.className = 'badge sim';
+                badge.dataset.sim = '1';
+            } else {
+                badge.textContent = 'live — UART + GPIO';
+                badge.className = 'badge';
+                badge.dataset.sim = '0';
+            }
+            if (setSection) setSection.style.display = '';
+            document.getElementById('status').textContent =
+                (data.running ? 'running' : 'stopped') + ' · ' + (data.led ? 'LED on' : 'LED off');
+            document.getElementById('status').className = 'status';
+            const build = document.getElementById('buildInfo');
+            if (build && data.ver) {
+                let t = 'v' + data.ver;
+                if (data.git) t += ' · ' + data.git;
+                if (data.date) t += ' · ' + data.date;
+                build.textContent = t;
+            }
+        }
+
+        function showDisconnected() {
+            document.getElementById('status').textContent = 'not connected';
+            document.getElementById('status').className = 'status err';
+        }
+
         async function updateStatus() {
             try {
                 const response = await fetch('/api/status', { cache: 'no-store' });
                 if (!response.ok) throw new Error('status ' + response.status);
-                const data = await response.json();
-                document.getElementById('timerDisplay').textContent = data.time;
-                const parts = String(data.time).split(':');
-                const min = parseInt(parts[0], 10) || 0;
-                const sec = parseInt(parts[1], 10) || 0;
-                if (lastMin === 0 && lastSec > 0 && lastSec <= 2 && min === 0 && sec === 0) {
-                    buzz();
-                }
-                lastMin = min;
-                lastSec = sec;
-                if (scoreInflight === 0) {
-                    home = Math.max(0, Math.min(99, data.home));
-                    away = Math.max(0, Math.min(99, data.away));
-                    renderScores();
-                }
-                const badge = document.getElementById('modeBadge');
-                const setSection = document.querySelector('.timer-set-section');
-                if (data.sim) {
-                    badge.textContent = 'simulate — no scoreboard attached';
-                    badge.className = 'badge sim';
-                    badge.dataset.sim = '1';
-                } else {
-                    badge.textContent = 'live — UART + GPIO';
-                    badge.className = 'badge';
-                    badge.dataset.sim = '0';
-                }
-                if (setSection) setSection.style.display = '';
-                document.getElementById('status').textContent =
-                    (data.running ? 'running' : 'stopped') + ' · ' + (data.led ? 'LED on' : 'LED off');
-                document.getElementById('status').className = 'status';
-                const build = document.getElementById('buildInfo');
-                if (build && data.ver) {
-                    let t = 'v' + data.ver;
-                    if (data.git) t += ' · ' + data.git;
-                    if (data.date) t += ' · ' + data.date;
-                    build.textContent = t;
-                }
-                return data;
+                applyStatus(await response.json());
+                return true;
             } catch (error) {
-                document.getElementById('status').textContent = 'not connected';
-                document.getElementById('status').className = 'status err';
-                return null;
+                showDisconnected();
+                return false;
             }
-        }
-
-        function nextPollDelay(data, rtt) {
-            if (!data || !data.running) return 350;
-            if (typeof data.age_ms !== 'number') return 200;
-            const period = 1000;
-            const mid = 500;
-            const age = Math.max(0, data.age_ms);
-            let wait = mid - (age % period) - rtt / 2;
-            if (wait < 80) wait += period;
-            return Math.max(80, Math.min(1200, wait));
         }
 
         document.getElementById('btnOta').addEventListener('click', async () => {
@@ -581,13 +577,61 @@
             }
         });
 
-        (function pollStatus() {
-            const t0 = performance.now();
-            updateStatus().then((data) => {
-                const rtt = performance.now() - t0;
-                setTimeout(pollStatus, nextPollDelay(data, rtt));
+        let events = null;
+        let fallbackTimer = null;
+        let fallbackOn = false;
+
+        function stopFallback() {
+            fallbackOn = false;
+            if (fallbackTimer !== null) {
+                clearTimeout(fallbackTimer);
+                fallbackTimer = null;
+            }
+        }
+
+        // Used until the event stream is open, and again when it is full (503) or drops.
+        // Steady state is the stream; this does not phase-lock to the second.
+        function startFallback() {
+            if (fallbackOn) return;
+            fallbackOn = true;
+            const tick = () => {
+                if (!fallbackOn) return;
+                if (events && events.readyState === EventSource.OPEN) {
+                    fallbackOn = false;
+                    return;
+                }
+                updateStatus().finally(() => {
+                    if (!fallbackOn) return;
+                    if (!events || events.readyState !== EventSource.OPEN) {
+                        fallbackTimer = setTimeout(tick, 350);
+                    } else {
+                        fallbackOn = false;
+                    }
+                });
+            };
+            tick();
+        }
+
+        function connectEvents() {
+            events = new EventSource('/api/events');
+            events.addEventListener('status', (ev) => {
+                let data;
+                try {
+                    data = JSON.parse(ev.data);
+                } catch (e) {
+                    return;
+                }
+                applyStatus(data);
+                stopFallback();
             });
-        })();
+            events.onerror = () => {
+                if (!events || events.readyState === EventSource.OPEN) return;
+                startFallback();
+            };
+        }
+
+        connectEvents();
+        startFallback();
     </script>
 </body>
 </html>

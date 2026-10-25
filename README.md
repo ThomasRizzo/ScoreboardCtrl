@@ -34,6 +34,7 @@ Do not use GP1 as a blinky: that pin is the start/stop pulse. GP0 is unused.
 | Wi-Fi stations (CYW43439 AP) | 4 |
 | DHCP pool | 192.168.0.10–.17 (8) |
 | HTTP at once | 12 TCP workers |
+| Clock event streams | 4 (`GET /api/events`); a fifth gets 503 and the page polls |
 | Idle TCP | socket timeout 60 s |
 | Each HTTP request | `Connection: close`; OTA body reads allowed 30 s |
 
@@ -180,6 +181,7 @@ Concurrent OTAs are rejected (`503`). Truncated uploads and bodies larger than A
 ```
 GET  /                         UI
 GET  /api/status               JSON: time, running, home, away, led, sim, ver, git, date, age_ms
+GET  /api/events               SSE (`event: status`, same JSON). One event per visible change. 503 if 4 streams are open.
 POST /api/ctrl/start
 POST /api/ctrl/stop
 POST /api/ctrl/start-stop
@@ -203,6 +205,8 @@ Unknown GETs (captive-portal probes such as `/generate_204`) 302 to `http://192.
 ```json
 {"time":"07:30","running":false,"home":0,"away":0,"led":false,"sim":false,"ver":"0.4.1","git":"abc1234","date":"2026-09-10","age_ms":120}
 ```
+
+The phone keeps a `GET /api/events` stream so the clock digit updates when the UART frame (or the simulate tick) changes MM:SS. The same event carries scores, running, and the LED. While the stream is down, the page polls `GET /api/status` every 350 ms.
 
 ## Layout
 
