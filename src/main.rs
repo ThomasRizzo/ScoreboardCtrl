@@ -733,6 +733,9 @@ impl EventSource for StatusEvents {
             {
                 Either3::First(()) => self.write_snapshot(&mut writer).await?,
                 Either3::Second(()) => writer.write_keepalive().await?,
+                // Quiet UART never calls `set_clock`. `heartbeat_task` refreshes
+                // `running` about once a second, then can block on the CYW43 LED.
+                // This arm publishes the flip to stopped at the 2 s mark.
                 Either3::Third(()) => {
                     {
                         let mut s = self.scoreboard.0.lock().await;
@@ -1263,8 +1266,9 @@ async fn web_task(
         // that misses RST would pin a worker that long and block reconnects.
         socket.set_timeout(Some(Duration::from_secs(60)));
         socket.set_keep_alive(None);
-        // Status events are one small write per second. Nagle would hold that
-        // segment until the phone ACKs the previous one.
+        // Status writes are one small segment per visible change (about once a
+        // second while the clock is counting, or a keepalive every 10 s).
+        // Nagle would hold that segment until the phone ACKs the previous one.
         socket.set_nagle_enabled(false);
         if let Err(e) = socket.accept(80).await {
             ap_log::emit(format_args!("tcp{} accept {:?}", task_id, e));
