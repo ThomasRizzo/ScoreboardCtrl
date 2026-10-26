@@ -236,3 +236,7 @@ Pico is `192.168.0.1/24`. DHCP hands out `.10`–`.17`, DNS and gateway point at
 - [Pico W](https://www.raspberrypi.com/documentation/microcontrollers/raspberry-pi-pico.html)
 - [cyw43](https://github.com/embassy-rs/embassy/tree/main/cyw43)
 - [embassy-boot](https://github.com/embassy-rs/embassy/tree/main/embassy-boot) (RP example bootloader/application)
+
+## Release builds (CI)
+
+`.github/workflows/release-ota.yml` builds the bootloader and OTA images (`just ota-artifact`, `just ota-artifact-sim`) and publishes `scoreboard-ctrl-ota.bin` (hardware), `scoreboard-ctrl-ota-sim.bin`, UF2/ELF files and `SHA256SUMS`. Push a `v*` tag to attach them to a GitHub Release; run it manually (workflow_dispatch) to get them as a workflow artifact only.

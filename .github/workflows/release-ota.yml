@@ -1,0 +1,92 @@
+name: Release OTA firmware
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-ota-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  REL: target/thumbv6m-none-eabi/release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git-testament embeds version/commit info
+
+      - name: Install system deps (elf2uf2-rs needs libudev)
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: |
+          rustup show
+          rustup target add thumbv6m-none-eabi
+          rustup component add rust-src llvm-tools-preview
+          rustup target add x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install elf2uf2-rs
+        run: command -v elf2uf2-rs || cargo install --locked elf2uf2-rs
+
+      - name: Host tests
+        run: just test-host
+
+      - name: Build bootloader + UF2
+        run: just uf2-bootloader
+
+      - name: Build OTA image (simulator)
+        run: |
+          just ota-artifact-sim
+          mkdir -p dist
+          cp "$REL/scoreboard-ctrl.bin" dist/scoreboard-ctrl-ota-sim.bin
+
+      - name: Build OTA image (hardware) + app UF2/ELF
+        run: |
+          just ota-artifact
+          cp "$REL/scoreboard-ctrl.bin" dist/scoreboard-ctrl-ota.bin
+          cp "$REL/scoreboard-ctrl" dist/scoreboard-ctrl-ota.elf
+          elf2uf2-rs "$REL/scoreboard-ctrl" dist/scoreboard-ctrl-ota.uf2
+          cp "$REL/scoreboard-bootloader.uf2" dist/
+          cp "$REL/scoreboard-bootloader" dist/scoreboard-bootloader.elf
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          ls -l
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scoreboard-ctrl-${{ github.ref_name }}-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Create/update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --generate-notes \
+              --verify-tag
+          fi
