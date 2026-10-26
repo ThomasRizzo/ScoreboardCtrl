@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ScoreboardCtrl architecture</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f4f1ea;
+    --ink: #1c1915;
+    --muted: #5c564c;
+    --line: #c8c0b2;
+    --card: #fffdf8;
+    --accent: #8c3a1e;
+    --ok: #1d5c45;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161411;
+      --ink: #f3efe6;
+      --muted: #b3aa9c;
+      --line: #3a342c;
+      --card: #211e1a;
+      --accent: #e8a48a;
+      --ok: #8fceb0;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    max-width: 46rem;
+    padding: 2.2rem 1.3rem 4rem;
+    font: 1.02rem/1.5 "Iowan Old Style", Palatino, Georgia, serif;
+    background: var(--bg);
+    color: var(--ink);
+  }
+  h1 { font-size: 1.8rem; line-height: 1.15; margin: 0 0 0.4rem; }
+  h2 { font-size: 1.25rem; margin: 2.2rem 0 0.6rem; }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 0.4rem; }
+  p, li { color: var(--ink); }
+  .lede { color: var(--muted); margin-top: 0; }
+  a { color: var(--accent); }
+  code, .path {
+    font-family: ui-monospace, "Cascadia Code", monospace;
+    font-size: 0.86em;
+  }
+  table { border-collapse: collapse; width: 100%; margin: 0.8rem 0 1rem; }
+  th, td { text-align: left; vertical-align: top; padding: 0.35rem 0.6rem 0.35rem 0; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.85rem; }
+  .flow { display: grid; gap: 0.45rem; margin: 1rem 0 1.2rem; }
+  .step {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-left: 4px solid var(--accent);
+    border-radius: 4px;
+    padding: 0.55rem 0.75rem;
+  }
+  .step strong { display: block; }
+  .step span { color: var(--muted); }
+  .arrow { text-align: center; color: var(--muted); line-height: 1; }
+  .cols { display: grid; gap: 0.8rem; }
+  @media (min-width: 720px) {
+    .cols { grid-template-columns: 1fr 1fr; }
+  }
+  .note {
+    border-top: 1px solid var(--line);
+    margin-top: 2rem;
+    padding-top: 0.8rem;
+    color: var(--muted);
+    font-size: 0.92rem;
+  }
+</style>
+</head>
+<body>
+<h1>ScoreboardCtrl</h1>
+<p class="lede">Pico W firmware for a GameCraft SK2229R. The Pico is the access point, the button driver, and the phone UI. This page is the update path: how a clock tick or a score tap becomes a digit on the phone.</p>
+<p>Join <strong>Scoreboard</strong> and open <a href="http://192.168.0.1/">http://192.168.0.1/</a>. Pins, flash map, and the HTTP list live in the <a href="../README.md">README</a>.</p>
+
+<h2>Pieces</h2>
+<table>
+  <tr><th>Task</th><th>Owns</th></tr>
+  <tr><td><code>wifi_task</code> / <code>net_task</code></td><td>CYW43 and the embassy-net stack. Open AP, <code>192.168.0.1</code>.</td></tr>
+  <tr><td><code>dhcp_task</code> / <code>dns_task</code> / <code>mdns_task</code></td><td>Leases <code>.10</code>–<code>.17</code>, DNS hijack, <code>scoreboard.local</code>.</td></tr>
+  <tr><td><code>read_serial</code></td><td>Hardware only. UART1 GP21, 38400. Parses <code>60 | chk | unk0 | MM | SS | unk1</code> and calls <code>set_clock</code>.</td></tr>
+  <tr><td><code>timer_task</code></td><td>Simulate only. Once a second, decrements the software clock while <code>running</code>.</td></tr>
+  <tr><td><code>board_task</code></td><td>50 ms GPIO pulses (GP1–GP11, GP13) and Pico-side scores. Commands arrive on a channel of 8.</td></tr>
+  <tr><td><code>heartbeat_task</code></td><td>Onboard LED (CYW43 gpio 0). Also refreshes <code>running</code> about once a second.</td></tr>
+  <tr><td><code>web_task</code> × 12</td><td>HTTP on port 80. One request per TCP connection (<code>Connection: close</code>). Nagle is off.</td></tr>
+  <tr><td><code>watchdog_task</code></td><td>Feeds the 8 s watchdog.</td></tr>
+</table>
+<p>Shared state is <code>ScoreboardState</code> behind one mutex. Home and away exist only there. UART does not carry scores. On hardware, <code>time</code> and <code>running</code> follow UART only: a GPIO pulse does not write <code>running</code>.</p>
+
+<h2>Update / event flow</h2>
+<p>The phone does not sample the second. It holds <code>GET /api/events</code> and paints each snapshot as the Pico writes it. <code>GET /api/status</code> is the same JSON, once, for scripts and for the fallback poll.</p>
+
+<div class="flow">
+  <div class="step"><strong>1. Something visible changes</strong><span>A new MM:SS, <code>running</code>, home, away, or the LED.</span></div>
+  <div class="arrow">↓</div>
+  <div class="step"><strong>2. <code>publish</code></strong><span>Compares that tuple with <code>announced</code>. Same tuple: no wake. Duplicate UART frames of the same second stay quiet.</span></div>
+  <div class="arrow">↓</div>
+  <div class="step"><strong>3. <code>Watch</code></strong><span><code>EVENTS</code> is an <code>embassy_sync</code> watch of <code>()</code>. The signal means “read the mutex.” Waiters always copy the latest state, so two ticks during one slow write collapse to the newer snapshot.</span></div>
+  <div class="arrow">↓</div>
+  <div class="step"><strong>4. SSE write</strong><span>Each stream task locks the state, refreshes <code>running</code>, and writes <code>event: status</code> plus the JSON. Then it flushes. Nagle is off, so the small packet is not held for the next ACK.</span></div>
+  <div class="arrow">↓</div>
+  <div class="step"><strong>5. Phone</strong><span><code>EventSource('/api/events')</code> parses <code>status</code> and updates the clock, scores (unless a score tap is in flight), the mode badge, and the running line.</span></div>
+</div>
+
+<h3>Who calls <code>publish</code></h3>
+<div class="cols">
+  <div class="step"><strong>Clock, hardware</strong><span><code>read_serial</code> → <code>set_clock</code> only moves <code>last_change</code> when MM:SS actually changes, then <code>refresh_running</code> → <code>publish</code>.</span></div>
+  <div class="step"><strong>Clock, simulate</strong><span><code>timer_task</code> decrements once a second and uses the same <code>set_clock</code>.</span></div>
+  <div class="step"><strong>Scores and LED</strong><span><code>board_task</code> updates home, away, or <code>led</code> and calls <code>publish</code>. The physical board is pulsed after the Pico value changes.</span></div>
+  <div class="step"><strong>Stopped</strong><span><code>running</code> is true only while MM:SS is not <code>00:00</code> and it changed less than 2 s ago. The stream arms a timer for that deadline. <code>heartbeat_task</code> refreshes on its own loop too. Either path publishes the flip to stopped.</span></div>
+</div>
+
+<h3>One stream, per phone</h3>
+<ol>
+  <li>On connect, the handler takes a watch receiver. Four receivers exist (<code>MAX_EVENT_STREAMS</code>). A fifth gets <code>503 busy</code> and the TCP connection closes.</li>
+  <li>The handler drops any signal from before this socket, writes one live snapshot, then waits.</li>
+  <li>The wait ends on a watch wake, on a 10 s keepalive comment (<code>:</code>), or on the 2 s stop deadline while the clock looks running.</li>
+  <li>The phone’s <code>EventSource</code> reconnects by itself (browser default, about 3 s). The first event after connect is a full snapshot, so a reconnect does not blank the clock.</li>
+  <li>While the stream is not <code>OPEN</code>, <code>index.html</code> polls <code>GET /api/status</code> every 350 ms. The first status event stops that poll.</li>
+</ol>
+<p>Each open stream holds one of the 12 <code>web_task</code> workers until the phone drops or the socket’s 60 s receive timeout fires. Four streams match the CYW43439 station cap and leave workers for score posts, captive-portal probes, and OTA. Other routes still send <code>Connection: close</code> after one response.</p>
+
+<h3>JSON on the wire</h3>
+<p>Same object for <code>/api/status</code> and for each <code>status</code> event:</p>
+<pre><code>{"time":"07:29","running":true,"home":1,"away":0,"led":false,"sim":false,"ver":"0.4.1","git":"abc1234","date":"2026-09-10","age_ms":40}</code></pre>
+<p><code>age_ms</code> is how long the current MM:SS has been unchanged. <code>00:00</code> and “unchanged ≥ 2 s” are both <code>running: false</code>.</p>
+
+<h2>Control flow</h2>
+<p>Taps go the other way. They do not wait for the event stream.</p>
+<div class="flow">
+  <div class="step"><strong>Phone <code>POST</code></strong><span><code>/api/ctrl/…</code>, <code>/api/timer/set/{min}/{sec}</code>, or <code>/led/on|off</code>. Score buttons paint the new number immediately and ignore stream scores until that POST finishes.</span></div>
+  <div class="arrow">↓</div>
+  <div class="step"><strong>Command channel</strong><span>The route enqueues a <code>Command</code> and returns <code>OK</code>. <code>board_task</code> is the only task that pulses pins.</span></div>
+  <div class="arrow">↓</div>
+  <div class="step"><strong>GPIO, 50 ms</strong><span>Start/stop is GP1, a toggle. Hardware pulses it only when UART <code>running</code> (or a pending desired state from a recent pulse) disagrees with the request. A second <code>/start</code> before the next UART tick does not pulse again. <code>/api/timer/set</code> stops a running clock before the min/sec pulse train.</span></div>
+  <div class="arrow">↓</div>
+  <div class="step"><strong>Back through the event path</strong><span>Scores and the LED publish as soon as the Pico value changes. The clock publishes only when a later UART frame (or the simulate tick) shows the new MM:SS.</span></div>
+</div>
+
+<h2>What stays off this path</h2>
+<ul>
+  <li>Captive portal: unknown GETs 302 to the UI. After the UI has been served, Apple hotspot probes get the Success page.</li>
+  <li>OTA: <code>POST /api/ota</code> writes the DFU slot and soft-resets. It is not a scoreboard event. See the README flash map. ACTIVE must stay under 896 KiB.</li>
+  <li><code>examples/uart-test.rs</code> is a separate image: USB CDC plus UART1, no AP and no events.</li>
+</ul>
+
+<p class="note">Source of the stream is <code>EventsService</code> and <code>ScoreboardState::publish</code> in <code>src/main.rs</code>. The phone side is the <code>EventSource</code> block at the bottom of <code>index.html</code>, which is compiled into the firmware.</p>
+</body>
+</html>

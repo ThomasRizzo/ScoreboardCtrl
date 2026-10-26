@@ -18,6 +18,7 @@ use core::cell::Cell;
 use core::cell::RefCell;
 use cyw43::Control;
 use cyw43_pio::PioSpi;
+use embassy_futures::select::{select3, Either3};
 #[cfg(feature = "ota")]
 use embassy_rp::flash::{Blocking, Flash};
 use embassy_rp::{
@@ -36,6 +37,7 @@ use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, Receiver, Sender},
     mutex::Mutex,
+    watch::Watch,
 };
 use embassy_time::{Duration, Instant, Timer};
 #[cfg(feature = "usb-log")]
@@ -44,17 +46,20 @@ use git_testament::git_testament_macros;
 #[cfg(feature = "ota")]
 use picoserve::routing::post_service;
 use picoserve::{
-    io::Read,
+    io::{Read, Write},
     make_static,
     request::{Path, Request},
-    response::{IntoResponse, Json, ResponseWriter, StatusCode},
+    response::{
+        sse::{EventSource, EventWriter},
+        EventStream, IntoResponse, Json, ResponseWriter, StatusCode,
+    },
     routing::{get, get_service, parse_path_segment, post, PathRouterService},
     AppBuilder, AppRouter, ResponseSent,
 };
 use portable_atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(not(feature = "simulate"))]
 use scoreboard_ctrl::decode::start_stop_pulse_needed;
-use scoreboard_ctrl::decode::{clock_is_running, resolve_pending_running};
+use scoreboard_ctrl::decode::{clock_is_running, resolve_pending_running, STOPPED_AFTER_MS};
 #[cfg(not(feature = "simulate"))]
 use scoreboard_ctrl::decode::{parse_clock_packet, write_hex, PACKET_LEN, PACKET_SOF};
 
@@ -91,6 +96,10 @@ embassy_rp::bind_interrupts!(struct Irqs {
 const WIFI_SSID: &str = "Scoreboard";
 /// Simultaneous HTTP/TCP clients. CYW43439 AP itself is max 4 Wi-Fi STAs.
 const WEB_TASK_POOL_SIZE: usize = 12;
+/// Open `GET /api/events` streams. Each one holds a web task until the phone
+/// drops or the 60 s receive timeout fires. Four matches the AP station cap
+/// and leaves workers for control posts, captive probes, and OTA.
+const MAX_EVENT_STREAMS: usize = 4;
 const NET_SOCKETS: usize = WEB_TASK_POOL_SIZE + 5;
 const PULSE_MS: u64 = 50;
 const PORTAL_URL: &str = "http://192.168.0.1/";
@@ -106,6 +115,22 @@ const UI_CAPTIVE_MS: u32 = 90_000;
 const SCORE_MAX: u16 = 99;
 
 type Cs = CriticalSectionRawMutex;
+
+/// Wakes `/api/events` streams when the visible scoreboard changes.
+/// `()` is enough: waiters read `ScoreboardState` themselves, so a burst of
+/// UART frames collapses to the latest snapshot.
+static EVENTS: Watch<Cs, (), MAX_EVENT_STREAMS> = Watch::new();
+
+/// Fields the phone renders. Duplicate UART frames of the same MM:SS must not wake streams.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Visible {
+    minutes: u8,
+    seconds: u8,
+    running: bool,
+    home: u16,
+    away: u16,
+    led: bool,
+}
 
 #[derive(Clone, Copy)]
 enum Command {
@@ -158,6 +183,8 @@ struct ScoreboardState {
     /// Desired `running` after a GP1 pulse, until UART agrees (or 2 s elapse).
     pending_running: Option<bool>,
     pending_at: Option<Instant>,
+    /// Last snapshot pushed to event streams.
+    announced: Visible,
 }
 
 impl Default for ScoreboardState {
@@ -172,6 +199,14 @@ impl Default for ScoreboardState {
             last_change: None,
             pending_running: None,
             pending_at: None,
+            announced: Visible {
+                minutes: PERIOD_MIN,
+                seconds: PERIOD_SEC,
+                running: false,
+                home: 0,
+                away: 0,
+                led: false,
+            },
         }
     }
 }
@@ -200,12 +235,33 @@ impl ScoreboardState {
         }
     }
 
+    fn visible(&self) -> Visible {
+        Visible {
+            minutes: self.minutes,
+            seconds: self.seconds,
+            running: self.running,
+            home: self.home,
+            away: self.away,
+            led: self.led,
+        }
+    }
+
     fn refresh_running(&mut self) {
         self.running = clock_is_running(self.minutes, self.seconds, self.age_ms() as u64);
         self.pending_running =
             resolve_pending_running(self.pending_running, self.running, self.pending_age_ms());
         if self.pending_running.is_none() {
             self.pending_at = None;
+        }
+        self.publish();
+    }
+
+    /// Wake event streams when time, running, scores, or the LED changed.
+    fn publish(&mut self) {
+        let view = self.visible();
+        if view != self.announced {
+            self.announced = view;
+            EVENTS.sender().send(());
         }
     }
 
@@ -513,21 +569,10 @@ impl AppBuilder for AppProps {
                 get(move || async move {
                     let mut s = scoreboard.0.lock().await;
                     s.refresh_running();
-                    let s = *s;
-                    Json(StatusJson {
-                        time: TimeStr::from_parts(s.minutes, s.seconds),
-                        running: s.running,
-                        home: s.home,
-                        away: s.away,
-                        led: s.led,
-                        sim: cfg!(feature = "simulate"),
-                        ver: VERSION,
-                        git: GIT_SHORT,
-                        date: GIT_DATE,
-                        age_ms: s.age_ms(),
-                    })
+                    Json(status_of(*s))
                 }),
-            );
+            )
+            .route("/api/events", get_service(EventsService { scoreboard }));
         #[cfg(feature = "ota")]
         {
             router.route(
@@ -582,6 +627,127 @@ struct StatusJson {
     git: &'static str,
     date: &'static str,
     age_ms: u32,
+}
+
+fn status_of(s: ScoreboardState) -> StatusJson {
+    StatusJson {
+        time: TimeStr::from_parts(s.minutes, s.seconds),
+        running: s.running,
+        home: s.home,
+        away: s.away,
+        led: s.led,
+        sim: cfg!(feature = "simulate"),
+        ver: VERSION,
+        git: GIT_SHORT,
+        date: GIT_DATE,
+        age_ms: s.age_ms(),
+    }
+}
+
+struct EventsService {
+    scoreboard: SharedScoreboard,
+}
+
+impl picoserve::routing::RequestHandlerService for EventsService {
+    async fn call_request_handler_service<R: Read, W: ResponseWriter<Error = R::Error>>(
+        &self,
+        _state: &(),
+        _path_parameters: (),
+        request: Request<'_, R>,
+        response_writer: W,
+    ) -> Result<ResponseSent, W::Error> {
+        log_http(&request.parts, "events");
+        let connection = request.body_connection.finalize().await?;
+        let Some(rx) = EVENTS.receiver() else {
+            ap_log::emit(format_args!("events busy"));
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ("Cache-Control", "no-store"),
+                "busy",
+            )
+                .write_to(connection, response_writer)
+                .await;
+        };
+        EventStream(StatusEvents {
+            scoreboard: self.scoreboard,
+            rx,
+        })
+        .write_to(connection, response_writer)
+        .await
+    }
+}
+
+struct StatusEvents {
+    scoreboard: SharedScoreboard,
+    rx: embassy_sync::watch::Receiver<'static, Cs, (), MAX_EVENT_STREAMS>,
+}
+
+impl StatusEvents {
+    async fn write_snapshot<W: Write>(
+        &self,
+        writer: &mut EventWriter<'_, W>,
+    ) -> Result<(), W::Error> {
+        let body = {
+            let mut s = self.scoreboard.0.lock().await;
+            s.refresh_running();
+            status_of(*s)
+        };
+        writer.write_event("status", Json(body)).await?;
+        writer.flush().await
+    }
+
+    /// How long until an unchanged clock should flip to stopped.
+    /// A quiet UART never calls `set_clock`, and `/api/status` is no longer polled.
+    async fn stop_wait(&self) -> Duration {
+        let (running, age) = {
+            let s = self.scoreboard.0.lock().await;
+            (s.running, s.age_ms() as u64)
+        };
+        if !running {
+            return Duration::from_secs(30);
+        }
+        if age >= STOPPED_AFTER_MS {
+            Duration::from_millis(1)
+        } else {
+            Duration::from_millis(STOPPED_AFTER_MS - age)
+        }
+    }
+}
+
+impl EventSource for StatusEvents {
+    async fn write_events<W: Write>(
+        mut self,
+        mut writer: EventWriter<'_, W>,
+    ) -> Result<(), W::Error> {
+        // Drop signals from before this connection. The snapshot below is live.
+        self.rx.try_changed();
+        self.write_snapshot(&mut writer).await?;
+        loop {
+            let stop_in = self.stop_wait().await;
+            match select3(
+                self.rx.changed(),
+                Timer::after_secs(10),
+                Timer::after(stop_in),
+            )
+            .await
+            {
+                Either3::First(()) => self.write_snapshot(&mut writer).await?,
+                Either3::Second(()) => writer.write_keepalive().await?,
+                // Quiet UART never calls `set_clock`. `heartbeat_task` refreshes
+                // `running` about once a second, then can block on the CYW43 LED.
+                // This arm publishes the flip to stopped at the 2 s mark.
+                Either3::Third(()) => {
+                    {
+                        let mut s = self.scoreboard.0.lock().await;
+                        s.refresh_running();
+                    }
+                    if self.rx.try_changed().is_some() {
+                        self.write_snapshot(&mut writer).await?;
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn pulse(pin: &mut Output<'static>) {
@@ -650,12 +816,20 @@ async fn board_task(
             match cmd {
                 Command::LedOn => {
                     control.0.lock().await.gpio_set(0, true).await;
-                    scoreboard.0.lock().await.led = true;
+                    {
+                        let mut s = scoreboard.0.lock().await;
+                        s.led = true;
+                        s.publish();
+                    }
                     log::info!("LED on");
                 }
                 Command::LedOff => {
                     control.0.lock().await.gpio_set(0, false).await;
-                    scoreboard.0.lock().await.led = false;
+                    {
+                        let mut s = scoreboard.0.lock().await;
+                        s.led = false;
+                        s.publish();
+                    }
                     log::info!("LED off");
                 }
                 Command::StartStop | Command::Start | Command::Stop => {
@@ -708,6 +882,7 @@ async fn board_task(
                         let do_hw = s.home < SCORE_MAX;
                         if do_hw {
                             s.home += 1;
+                            s.publish();
                         }
                         (do_hw, s.led)
                     };
@@ -727,6 +902,7 @@ async fn board_task(
                         let do_hw = s.home > 0;
                         if do_hw {
                             s.home -= 1;
+                            s.publish();
                         }
                         (do_hw, s.led)
                     };
@@ -746,6 +922,7 @@ async fn board_task(
                         let do_hw = s.away < SCORE_MAX;
                         if do_hw {
                             s.away += 1;
+                            s.publish();
                         }
                         (do_hw, s.led)
                     };
@@ -765,6 +942,7 @@ async fn board_task(
                         let do_hw = s.away > 0;
                         if do_hw {
                             s.away -= 1;
+                            s.publish();
                         }
                         (do_hw, s.led)
                     };
@@ -785,6 +963,7 @@ async fn board_task(
                         let away = s.away.min(SCORE_MAX);
                         s.home = 0;
                         s.away = 0;
+                        s.publish();
                         (home, away, s.led)
                     };
                     pending_home_dec = 0;
@@ -1087,6 +1266,10 @@ async fn web_task(
         // that misses RST would pin a worker that long and block reconnects.
         socket.set_timeout(Some(Duration::from_secs(60)));
         socket.set_keep_alive(None);
+        // Status writes are one small segment per visible change (about once a
+        // second while the clock is counting, or a keepalive every 10 s).
+        // Nagle would hold that segment until the phone ACKs the previous one.
+        socket.set_nagle_enabled(false);
         if let Err(e) = socket.accept(80).await {
             ap_log::emit(format_args!("tcp{} accept {:?}", task_id, e));
             continue;
